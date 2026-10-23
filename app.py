@@ -2,11 +2,12 @@ import streamlit as st
 
 import sqlite3
 
+import psycopg
+from psycopg.rows import dict_row
+
 import pandas as pd
 
 import hashlib
-
-import hmac
 
 from pathlib import Path
 
@@ -19,6 +20,8 @@ import base64
 from html import escape
 
 import json
+import os
+import secrets
 
 
 
@@ -40,9 +43,25 @@ APP_DIR = Path(__file__).parent
 
 DB_FILE = APP_DIR / "meal.db"
 
+try:
+          DATABASE_URL = st.secrets.get("DATABASE_URL") or os.environ.get("DATABASE_URL")
+except FileNotFoundError:
+          DATABASE_URL = os.environ.get("DATABASE_URL")
+
+if DATABASE_URL and "sslmode=" not in DATABASE_URL:
+          DATABASE_URL = f"{DATABASE_URL}{'&' if '?' in DATABASE_URL else '?'}sslmode=require"
+
 LOGO_FILE = APP_DIR / "ans.png"
 
-REPORT_TEMPLATE = APP_DIR.parent.parent / "END SEPTEMBER  2026 STATISTICAL REPORT.xlsx"
+REPORT_TEMPLATE_NAME = "END SEPTEMBER  2026 STATISTICAL REPORT.xlsx"
+DEFAULT_REPORT_TEMPLATE = APP_DIR.parent.parent / REPORT_TEMPLATE_NAME
+PROJECT_REPORT_TEMPLATE = APP_DIR / REPORT_TEMPLATE_NAME
+REPORT_TEMPLATE = Path(
+          os.environ.get(
+                    "REPORT_TEMPLATE_PATH",
+                    str(PROJECT_REPORT_TEMPLATE if PROJECT_REPORT_TEMPLATE.exists() else DEFAULT_REPORT_TEMPLATE),
+          )
+)
 
 CENTRES = ["DBK", "DB1", "DB2", "DB3", "DB4", "DB Kalobeyei ICT", "DB Kalobeyei Buss"]
 
@@ -73,6 +92,9 @@ STATUS_DETAILS = [
 STATUSES = ["Ongoing"] + STATUS_DETAILS
 
 NATIONALITIES = ["South Sudanese", "Sudanese", "Somali", "Ethiopian", "Congolese", "Burundian", "Kenyan", "Other", "Not specified"]
+DB_ERRORS = (sqlite3.Error, psycopg.Error)
+DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError, psycopg.IntegrityError)
+LEARNER_UPDATE_ERRORS = DB_ERRORS + (PermissionError,)
 REPORT_NATIONALITY_ALIASES = {
           "Sud": {"sudanese", "sudan"},
           "S.Sud": {"south sudanese", "south sudan", "s sudanese", "s sud", "south sadanese"},
@@ -176,11 +198,48 @@ p,li,label{color:#35475D}
 
 def get_connection():
 
+          if DATABASE_URL:
+                    return DatabaseConnection(
+                              psycopg.connect(
+                                        DATABASE_URL,
+                                        row_factory=dict_row,
+                                        prepare_threshold=None,
+                                        connect_timeout=10,
+                              ),
+                              is_postgres=True,
+                    )
+
           conn = sqlite3.connect(DB_FILE, timeout=30)
 
           conn.row_factory = sqlite3.Row
 
-          return conn
+          return DatabaseConnection(conn, is_postgres=False)
+
+
+class DatabaseConnection:
+          def __init__(self, connection, is_postgres):
+                    self.connection = connection
+                    self.is_postgres = is_postgres
+
+          def execute(self, query, parameters=()):
+                    if self.is_postgres:
+                              query = query.replace("BEGIN IMMEDIATE", "BEGIN").replace("?", "%s")
+                    return self.connection.execute(query, parameters)
+
+          def __getattr__(self, name):
+                    return getattr(self.connection, name)
+
+          def __enter__(self):
+                    return self
+
+          def __exit__(self, exception_type, exception, traceback):
+                    try:
+                              if exception_type is None:
+                                        self.connection.commit()
+                              else:
+                                        self.connection.rollback()
+                    finally:
+                              self.connection.close()
 
 
 
@@ -188,9 +247,38 @@ def get_connection():
 
 def hash_password(password):
 
-          # Retained for compatibility with existing local database accounts.
+          iterations = 600_000
+          salt = secrets.token_bytes(16)
+          password_hash = hashlib.pbkdf2_hmac(
+                    "sha256",
+                    password.encode("utf-8"),
+                    salt,
+                    iterations,
+          )
+          return f"pbkdf2_sha256${iterations}${salt.hex()}${password_hash.hex()}"
 
-          return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+def verify_password(password, saved_hash):
+          if saved_hash.startswith("pbkdf2_sha256$"):
+                    try:
+                              algorithm, iterations_text, salt_hex, digest_hex = saved_hash.split("$", 3)
+                              iterations = int(iterations_text)
+                              if algorithm != "pbkdf2_sha256" or not 100_000 <= iterations <= 2_000_000:
+                                        return False, False
+                              expected = hashlib.pbkdf2_hmac(
+                                        "sha256",
+                                        password.encode("utf-8"),
+                                        bytes.fromhex(salt_hex),
+                                        iterations,
+                              ).hex()
+                              return secrets.compare_digest(expected, digest_hex), False
+                    except (ValueError, TypeError):
+                              return False, False
+
+          legacy_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+          if secrets.compare_digest(legacy_hash, saved_hash):
+                    return True, True
+          return False, False
 
 
 
@@ -199,6 +287,47 @@ def hash_password(password):
 def init_db():
 
           with get_connection() as conn:
+
+                    if DATABASE_URL:
+                              conn.execute("""CREATE TABLE IF NOT EXISTS users(
+                                        id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                                        name TEXT NOT NULL,
+                                        email TEXT UNIQUE NOT NULL,
+                                        password TEXT NOT NULL,
+                                        role TEXT NOT NULL DEFAULT 'centre_head',
+                                        centre TEXT,
+                                        approved INTEGER NOT NULL DEFAULT 0,
+                                        created_at TEXT)""")
+                              conn.execute("""CREATE TABLE IF NOT EXISTS learners(
+                                        id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                                        individual_no TEXT, name TEXT NOT NULL, gender TEXT, age INTEGER,
+                                        disability TEXT, nationality TEXT, location TEXT, phone TEXT,
+                                        centre TEXT, course TEXT, duration TEXT, education TEXT,
+                                        certification TEXT, status TEXT DEFAULT 'Ongoing',
+                                        dropout_reason TEXT, year INTEGER, created_at TEXT,
+                                        completion_month TEXT, dropout_quarter TEXT, record_no TEXT,
+                                        institutional_identifier TEXT, kasi TEXT, remarks TEXT,
+                                        sponsor TEXT, school_fee TEXT, payment TEXT,
+                                        payment_confirmation_no TEXT, reason TEXT)""")
+                              conn.execute("""CREATE TABLE IF NOT EXISTS employment(
+                                        id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                                        individual_no TEXT, graduate_name TEXT NOT NULL, gender TEXT,
+                                        centre TEXT, course TEXT, graduation_year INTEGER,
+                                        employment_status TEXT, employer_or_business TEXT,
+                                        job_title TEXT, monthly_income DOUBLE PRECISION, phone TEXT,
+                                        follow_up_date TEXT, notes TEXT, created_at TEXT)""")
+                              conn.execute("""CREATE TABLE IF NOT EXISTS change_audit(
+                                        id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                                        actor_id BIGINT, actor_name TEXT NOT NULL, actor_email TEXT,
+                                        actor_role TEXT, actor_centre TEXT, action TEXT NOT NULL,
+                                        entity_type TEXT NOT NULL, entity_id BIGINT, entity_label TEXT,
+                                        before_data TEXT, after_data TEXT, details TEXT,
+                                        created_at TEXT NOT NULL)""")
+                              conn.execute("CREATE INDEX IF NOT EXISTS idx_learners_centre ON learners(centre)")
+                              conn.execute("CREATE INDEX IF NOT EXISTS idx_learners_individual_no ON learners(individual_no)")
+                              conn.execute("CREATE INDEX IF NOT EXISTS idx_change_audit_created_at ON change_audit(created_at)")
+                              conn.execute("CREATE INDEX IF NOT EXISTS idx_change_audit_entity ON change_audit(entity_type, entity_id)")
+                              return
 
                     conn.execute("""CREATE TABLE IF NOT EXISTS users(
 
@@ -357,7 +486,7 @@ def load_learners():
 
           with get_connection() as conn:
 
-                    return pd.read_sql_query("SELECT * FROM learners ORDER BY id DESC", conn)
+                    return read_sql_frame(conn, "SELECT * FROM learners ORDER BY id DESC")
 
 
 
@@ -367,7 +496,16 @@ def load_employment():
 
           with get_connection() as conn:
 
-                    return pd.read_sql_query("SELECT * FROM employment ORDER BY id DESC", conn)
+                    return read_sql_frame(conn, "SELECT * FROM employment ORDER BY id DESC")
+
+
+def read_sql_frame(conn, query, parameters=()):
+          result = conn.execute(query, parameters)
+          columns = [
+                    column.name if hasattr(column, "name") else column[0]
+                    for column in result.description
+          ]
+          return pd.DataFrame([dict(row) for row in result.fetchall()], columns=columns)
 
 
 
@@ -1744,8 +1882,21 @@ if st.session_state.user is None:
                     if submitted:
 
                               account = get_user_by_email(email)
+                              authenticated, upgrade_legacy_hash = (
+                                        verify_password(password, account["password"])
+                                        if account
+                                        else (False, False)
+                              )
 
-                              if account and hmac.compare_digest(account["password"], hash_password(password)):
+                              if account and authenticated:
+
+                                        if upgrade_legacy_hash:
+                                                  with get_connection() as conn:
+                                                            conn.execute(
+                                                                      "UPDATE users SET password=? WHERE id=?",
+                                                                      (hash_password(password), account["id"]),
+                                                            )
+                                                            conn.commit()
 
                                         if not account["approved"]:
 
@@ -1821,7 +1972,7 @@ if st.session_state.user is None:
 
                                                   st.success("Administrator account created. Please log in." if role == "admin" else "Account created. Await administrator approval.")
 
-                                        except sqlite3.IntegrityError:
+                                        except DB_INTEGRITY_ERRORS:
 
                                                   st.error("This email is already registered.")
 
@@ -2169,7 +2320,7 @@ elif page == "Register Learner":
                                         with get_connection() as conn:
                                                   result = conn.execute("""INSERT INTO learners(
                                                   record_no,institutional_identifier,individual_no,name,gender,age,disability,nationality,location,phone,centre,course,duration,education,certification,status,dropout_reason,year,completion_month,dropout_quarter,created_at,kasi,remarks,sponsor,school_fee,payment,payment_confirmation_no,reason
-                                                  ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                                                  ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id""", (
                                                   record_no.strip() or None, institutional_identifier, individual_no.strip() or None,
                                                   learner_name.strip(), gender, int(age), disability, nationality, location.strip() or None,
                                                   phone.strip() or None, institutional_identifier, course.strip() or None, duration.strip() or None,
@@ -2179,23 +2330,24 @@ elif page == "Register Learner":
                                                   datetime.now().isoformat(timespec="seconds"), kasi, remarks.strip() or None,
                                                   sponsor.strip() or None, school_fee.strip() or None, payment.strip() or None,
                                                   payment_confirmation_no.strip() or None, reason.strip() or None))
+                                                  inserted_id = result.fetchone()["id"]
                                                   saved_record = conn.execute(
                                                             "SELECT * FROM learners WHERE id=?",
-                                                            (result.lastrowid,),
+                                                            (inserted_id,),
                                                   ).fetchone()
                                                   record_audit(
                                                             conn,
                                                             user,
                                                             "create",
                                                             "learner",
-                                                            result.lastrowid,
+                                                            inserted_id,
                                                             learner_name.strip(),
                                                             after_data=audit_record_values(saved_record),
                                                   )
                                                   conn.commit()
                                         st.success("Student record saved successfully.")
                                         st.rerun()
-                              except sqlite3.Error as e:
+                              except DB_ERRORS as e:
                                         st.error(f"Could not save student: {e}")
 
 
@@ -2320,9 +2472,9 @@ elif page == "Upload Student Data":
                                                             if not individual_no and record_no:
                                                                       existing_register_row = conn.execute(
                                                                                 """SELECT id FROM learners
-                                                                                WHERE TRIM(COALESCE(record_no,''))=? COLLATE NOCASE
-                                                                                AND TRIM(COALESCE(name,''))=? COLLATE NOCASE
-                                                                                AND TRIM(COALESCE(centre,''))=? COLLATE NOCASE
+                                                                                WHERE LOWER(TRIM(COALESCE(record_no,'')))=LOWER(?)
+                                                                                AND LOWER(TRIM(COALESCE(name,'')))=LOWER(?)
+                                                                                AND LOWER(TRIM(COALESCE(centre,'')))=LOWER(?)
                                                                                 LIMIT 1""",
                                                                                 (record_no, name, centre_val),
                                                                       ).fetchone()
@@ -2342,7 +2494,7 @@ elif page == "Upload Student Data":
                                                             reason_val = str(row["reason"]).strip()
                                                             result = conn.execute("""INSERT INTO learners(
                                                             individual_no,name,gender,age,disability,nationality,location,phone,centre,course,duration,education,certification,status,dropout_reason,year,completion_month,dropout_quarter,created_at,record_no,institutional_identifier,kasi,remarks,sponsor,school_fee,payment,payment_confirmation_no,reason
-                                                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                                                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id""", (
                                                             individual_no or None, name, gender_val or None, age_val,
                                                             str(row["disability"]).strip() or None, str(row["nationality"]).strip() or None,
                                                             str(row["location"]).strip() or None, str(row["phone"]).strip() or None,
@@ -2355,16 +2507,17 @@ elif page == "Upload Student Data":
                                                             str(row["sponsor"]).strip() or None, str(row["school_fee"]).strip() or None,
                                                             str(row["payment"]).strip() or None, str(row["payment_confirmation_no"]).strip() or None,
                                                             reason_val or None))
+                                                            inserted_id = result.fetchone()["id"]
                                                             saved_record = conn.execute(
                                                                       "SELECT * FROM learners WHERE id=?",
-                                                                      (result.lastrowid,),
+                                                                      (inserted_id,),
                                                             ).fetchone()
                                                             record_audit(
                                                                       conn,
                                                                       user,
                                                                       "import",
                                                                       "learner",
-                                                                      result.lastrowid,
+                                                                      inserted_id,
                                                                       name,
                                                                       after_data=audit_record_values(saved_record),
                                                                       details={"file": uploaded.name, "source_row": rownum},
@@ -2677,7 +2830,7 @@ elif page == "Learner Records":
                                                                                 "Learner details updated and saved in the change history."
                                                                       )
                                                                       st.rerun()
-                                        except (sqlite3.Error, PermissionError) as error:
+                                        except LEARNER_UPDATE_ERRORS as error:
                                                   st.error(f"Could not update learner record: {error}")
 
                     if is_admin:
@@ -2814,17 +2967,18 @@ elif page == "Employment Outcomes":
 
                               with get_connection() as conn:
 
-                                        result = conn.execute("""INSERT INTO employment(individual_no,graduate_name,gender,centre,course,graduation_year,employment_status,employer_or_business,job_title,monthly_income,phone,follow_up_date,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (individual_no.strip() or None, graduate_name.strip(), gender, centre, course.strip(), int(graduation_year), employment_status, employer.strip(), job_title.strip(), float(monthly_income) if monthly_income else None, phone.strip(), follow_up_date.isoformat(), notes.strip(), datetime.now().isoformat(timespec="seconds")))
+                                        result = conn.execute("""INSERT INTO employment(individual_no,graduate_name,gender,centre,course,graduation_year,employment_status,employer_or_business,job_title,monthly_income,phone,follow_up_date,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id""", (individual_no.strip() or None, graduate_name.strip(), gender, centre, course.strip(), int(graduation_year), employment_status, employer.strip(), job_title.strip(), float(monthly_income) if monthly_income else None, phone.strip(), follow_up_date.isoformat(), notes.strip(), datetime.now().isoformat(timespec="seconds")))
+                                        inserted_id = result.fetchone()["id"]
                                         saved_employment = conn.execute(
                                                   "SELECT * FROM employment WHERE id=?",
-                                                  (result.lastrowid,),
+                                                  (inserted_id,),
                                         ).fetchone()
                                         record_audit(
                                                   conn,
                                                   user,
                                                   "create",
                                                   "employment",
-                                                  result.lastrowid,
+                                                  inserted_id,
                                                   graduate_name.strip(),
                                                   after_data=audit_record_values(saved_employment),
                                         )
@@ -3041,7 +3195,10 @@ elif page == "User Approvals" and is_admin:
 
           with get_connection() as conn:
 
-                    users_df = pd.read_sql_query("SELECT id,name,email,role,centre,approved,created_at FROM users ORDER BY approved ASC,name ASC", conn)
+                    users_df = read_sql_frame(
+                              conn,
+                              "SELECT id,name,email,role,centre,approved,created_at FROM users ORDER BY approved ASC,name ASC",
+                    )
 
           if users_df.empty:
 
@@ -3106,13 +3263,13 @@ elif page == "Change History" and is_admin:
           st.subheader("Learner and Employment Change History")
           st.caption("This audit log records who changed, imported or deleted each learner and employment record, and preserves the before-and-after data.")
           with get_connection() as conn:
-                    audit_df = pd.read_sql_query(
+                    audit_df = read_sql_frame(
+                              conn,
                               """SELECT id, created_at, actor_name, actor_email, actor_role, actor_centre,
                                         action, entity_type, entity_id, entity_label, before_data, after_data, details
                                  FROM change_audit
                                  ORDER BY id DESC
                                  LIMIT 5000""",
-                              conn,
                     )
           if audit_df.empty:
                     st.info("No learner or employment changes have been recorded yet.")
@@ -3256,7 +3413,7 @@ elif page == "Delete All Data" and is_admin:
                                                   f"{deleted_employment} employment outcome record(s). User accounts were kept."
                                         )
                                         st.rerun()
-                              except sqlite3.Error as error:
+                              except DB_ERRORS as error:
                                         st.error(f"Could not delete all learner and employment data: {error}")
 
 
