@@ -4,6 +4,7 @@ __pycache__/
 *.sqlite
 *.sqlite3
 *.xlsx
+!END SEPTEMBER 2026 STATISTICAL REPORT.xlsx
 *.xls
 .venv/
 venv/

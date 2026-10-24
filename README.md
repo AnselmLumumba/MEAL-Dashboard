@@ -28,7 +28,7 @@ The app uses PostgreSQL when `DATABASE_URL` is configured; otherwise, it uses lo
 
 ### Excel report template
 
-The statistical report generator looks for `END SEPTEMBER 2026 STATISTICAL REPORT.xlsx`. Excel workbooks are excluded from Git. For hosted report generation, either make a reviewed, data-free template available in the deployment and configure `REPORT_TEMPLATE_PATH` to its path, or upload a blank, data-free workbook on the **Generate Excel Report** page. Uploaded templates are used in memory and are not committed to Git. Never upload a workbook containing identifiable student records.
+The statistical report generator uses the data-free `END SEPTEMBER 2026 STATISTICAL REPORT.xlsx` template included in the repository. Other Excel workbooks remain excluded from Git. Never commit or upload a workbook containing identifiable student records.
 
 ### Database behavior
 

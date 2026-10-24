@@ -27,6 +27,7 @@ import secrets
 
 
 from openpyxl import load_workbook
+from openpyxl.cell.cell import MergedCell
 
 from openpyxl.styles import Font, PatternFill, Alignment
 
@@ -1082,13 +1083,10 @@ def populate_active_trade_sheet(ws, frame, collect_unmatched=False):
                               "sud": "Sud", "s sud": "S.Sud", "som": "Som", "ethi": "Ethi",
                               "cong": "Cong", "bur": "Bur", "uga": "Uga", "yemen": "Yemen",
                               "rwan": "Rwan", "afg": "Afg", "mdg": "Mag", "madg": "Mag", "eritrea": "Eritr",
-                              "kenya others": "Kenya Others", "host": "Host",
+                              "kenya": "Host", "kenya others": "Kenya Others", "host": "Host",
                     }
                     if code in code_lookup:
                               column_codes[code_lookup[code]] = column
-          missing_codes = set(REPORT_NATIONALITY_ALIASES) - {"Other / Not specified"} - set(column_codes)
-          if missing_codes:
-                    raise ValueError(f"Report sheet {ws.title!r} is missing nationality columns: {', '.join(sorted(missing_codes))}")
 
           code_lookup = {
                     normalise(alias): code
@@ -1223,10 +1221,32 @@ def populate_active_trade_sheet(ws, frame, collect_unmatched=False):
                     for code, count in supplemental["counts"].items():
                               gender_totals[supplemental["gender"]][code] += count
 
+          row_totals = {
+                    trade_row["row"]: sum(trade_row["counts"].values())
+                    for trade_row in trade_rows
+          }
           for trade_row in trade_rows:
                     row_number = trade_row["row"]
-                    row_total = sum(trade_row["counts"].values())
-                    ws.cell(row_number, 17, row_total)
+                    row_total = row_totals[row_number]
+                    total_cell = ws.cell(row_number, 17)
+                    if not isinstance(total_cell, MergedCell):
+                              merged_total = next(
+                                        (
+                                                  merged_range
+                                                  for merged_range in ws.merged_cells.ranges
+                                                  if merged_range.min_col <= 17 <= merged_range.max_col
+                                                  and merged_range.min_row <= row_number <= merged_range.max_row
+                                        ),
+                                        None,
+                              )
+                              if merged_total:
+                                        if row_number != merged_total.min_row:
+                                                  continue
+                                        row_total = sum(
+                                                  row_totals.get(merged_row, 0)
+                                                  for merged_row in range(merged_total.min_row, merged_total.max_row + 1)
+                                        )
+                              total_cell.value = row_total
                     if trade_row["gender"] == "male":
                               female_row = next(
                                         (
@@ -1270,10 +1290,29 @@ def populate_active_trade_sheet(ws, frame, collect_unmatched=False):
                                         ws.cell(total_row, column, male + female)
                     male_total = sum(gender_totals["male"].values())
                     female_total = sum(gender_totals["female"].values())
-                    ws.cell(male_row, 17, male_total)
-                    ws.cell(female_row, 17, female_total)
+                    male_total_cell = ws.cell(male_row, 17)
+                    female_total_cell = ws.cell(female_row, 17)
+                    if not isinstance(male_total_cell, MergedCell):
+                              merged_grand_total = next(
+                                        (
+                                                  merged_range
+                                                  for merged_range in ws.merged_cells.ranges
+                                                  if merged_range.min_col <= 17 <= merged_range.max_col
+                                                  and merged_range.min_row <= male_row <= merged_range.max_row
+                                        ),
+                                        None,
+                              )
+                              male_total_cell.value = (
+                                        male_total + female_total
+                                        if merged_grand_total and merged_grand_total.max_row > male_row
+                                        else male_total
+                              )
+                    if not isinstance(female_total_cell, MergedCell):
+                              female_total_cell.value = female_total
                     if total_row is not None:
-                              ws.cell(total_row, 17, male_total + female_total)
+                              total_cell = ws.cell(total_row, 17)
+                              if not isinstance(total_cell, MergedCell):
+                                        total_cell.value = male_total + female_total
                     ws.cell(male_row, 18, male_total + female_total)
 
                     host_codes = {"Kenya Others", "Host"}
@@ -1545,6 +1584,7 @@ def generate_statistical_report(frame, employment_frame, template_bytes=None):
 
           trade_sheet_names = [
                     "SEPTEMBER STATISTICAL ANALYSIS",
+                    "APRIL STATISTICAL ANALYSIS",
                     "PROFESSIONAL COURSES",
                     "VOCATIONAL COURSES",
                     "TECHNICAL COURSES",
@@ -1556,9 +1596,14 @@ def generate_statistical_report(frame, employment_frame, template_bytes=None):
                               unmatched = populate_active_trade_sheet(
                                         wb[sheet_name],
                                         frame,
-                                        collect_unmatched=(sheet_name == "SEPTEMBER STATISTICAL ANALYSIS"),
+                                        collect_unmatched=(
+                                                  sheet_name in {
+                                                            "SEPTEMBER STATISTICAL ANALYSIS",
+                                                            "APRIL STATISTICAL ANALYSIS",
+                                                  }
+                                        ),
                               )
-                              if sheet_name == "SEPTEMBER STATISTICAL ANALYSIS":
+                              if sheet_name in {"SEPTEMBER STATISTICAL ANALYSIS", "APRIL STATISTICAL ANALYSIS"}:
                                         unmatched_active_learners = unmatched
 
 
