@@ -1522,15 +1522,16 @@ def populate_enrollment_summary(ws, frame):
 
 
 
-def generate_statistical_report(frame, employment_frame):
+def generate_statistical_report(frame, employment_frame, template_bytes=None):
 
-          if not REPORT_TEMPLATE.exists():
+          if template_bytes is None and not REPORT_TEMPLATE.exists():
 
-                    raise FileNotFoundError(f"Template not found: {REPORT_TEMPLATE}")
+                    raise FileNotFoundError(f"Template not found: {REPORT_TEMPLATE.name}")
 
           buffer = BytesIO()
 
-          wb = load_workbook(REPORT_TEMPLATE)
+          template_source = BytesIO(template_bytes) if template_bytes is not None else REPORT_TEMPLATE
+          wb = load_workbook(template_source)
           wb.calculation.calcMode = "auto"
           wb.calculation.fullCalcOnLoad = True
           wb.calculation.forceFullCalc = True
@@ -3134,15 +3135,23 @@ elif page == "Generate Excel Report":
 
           st.subheader("Automatic Excel Statistical Report")
 
-          st.write("Generate a downloadable Excel workbook using live records from the MEAL database and the existing statistical report template.")
+          st.write("Generate a downloadable Excel workbook using live records from the MEAL database and the statistical report template.")
 
           st.caption(f"Template expected: {REPORT_TEMPLATE.name}")
 
-          if not REPORT_TEMPLATE.exists():
+          uploaded_template = None
+          if not REPORT_TEMPLATE.is_file():
 
-                    st.error(f"Excel template not found: {REPORT_TEMPLATE}")
+                    st.warning("The report template is not included in this deployment. Upload a blank, data-free copy to generate a report.")
+                    uploaded_template = st.file_uploader(
+                              "Upload a blank statistical report template",
+                              type=["xlsx"],
+                              key="statistical_report_template",
+                              help="Do not upload a workbook containing learner or employment records.",
+                    )
 
-          else:
+          template_available = REPORT_TEMPLATE.is_file() or uploaded_template is not None
+          if template_available:
 
                     genders = df["gender"].apply(normalise) if not df.empty else pd.Series(dtype=str)
 
@@ -3166,7 +3175,8 @@ elif page == "Generate Excel Report":
 
                               try:
 
-                                        generated = generate_statistical_report(df, employment_df)
+                                        template_bytes = uploaded_template.getvalue() if uploaded_template is not None else None
+                                        generated = generate_statistical_report(df, employment_df, template_bytes=template_bytes)
 
                                         st.session_state["excel_report_bytes"] = generated
 
