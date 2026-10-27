@@ -16,6 +16,13 @@ Create an account once, then use **Login** on later visits. The login form's
 Use it only on a private device; browsers may clear or limit stored cookies.
 Signing out revokes that device's remembered session.
 
+New student admission numbers are generated as `CENTRE/COURSE###/YEAR`
+(for example, `DBK/COMP001/2026`). Numbering starts at 001 for each centre,
+course and year. Student-register uploads keep supplied admission numbers and
+generate numbers for new rows that do not have one. Administrators can generate
+numbers for existing records with missing identifiers from the learner records
+page; existing admission numbers are not changed.
+
 ## Streamlit Community Cloud + Supabase
 
 The app uses PostgreSQL when `DATABASE_URL` is configured; otherwise, it uses local SQLite. The hosted database is initialized with an empty schema on first startup. The local `meal.db` is not uploaded or copied to the cloud.

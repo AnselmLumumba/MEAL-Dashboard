@@ -114,6 +114,77 @@ COURSES = [
           "Other",
 ]
 
+CENTRE_ADMISSION_CODES = {
+          "DBK": "DBK",
+          "DB1": "DB1",
+          "DB2": "DB2",
+          "DB3": "DB3",
+          "DB4": "DB4",
+          "DB Kalobeyei ICT": "DKI",
+          "DB Kalobeyei Buss": "DKB",
+}
+
+COURSE_ADMISSION_CODES = {
+          "Agriculture": "AGRI",
+          "English Basic": "ENGB",
+          "English Intermediate": "ENGI",
+          "Computer Basics": "COMP",
+          "ICT NITA III": "ICT3",
+          "ICT NITA II": "ICT2",
+          "ICT NITA I": "ICT1",
+          "Fashion & Design": "FASH",
+          "Dressmaking NITA III": "DRM3",
+          "Dressmaking NITA II": "DRM2",
+          "Dressmaking NITA I": "DRM1",
+          "Masonry NITA III": "MAS3",
+          "Masonry NITA II": "MAS2",
+          "Masonry NITA I": "MAS1",
+          "Plumbing NITA III": "PLB3",
+          "Plumbing NITA II": "PLB2",
+          "Plumbing NITA I": "PLB1",
+          "Tailoring NITA III": "TLR3",
+          "Tailoring NITA II": "TLR2",
+          "Tailoring NITA I": "TLR1",
+          "Carpentry NITA III": "CAR3",
+          "Carpentry NITA II": "CAR2",
+          "Carpentry NITA I": "CAR1",
+          "Electrical NITA III": "ELE3",
+          "Electrical NITA II": "ELE2",
+          "Electrical NITA I": "ELE1",
+          "Secretarial Studies": "SECR",
+          "Solar NITA III": "SOL3",
+          "Solar NITA II": "SOL2",
+          "Solar NITA I": "SOL1",
+          "Refrigeration NITA III": "REF3",
+          "Refrigeration NITA II": "REF2",
+          "Refrigeration NITA I": "REF1",
+          "Welding NITA III": "WLD3",
+          "Welding NITA II": "WLD2",
+          "Welding NITA I": "WLD1",
+          "LVM NITA III": "LVM3",
+          "LVM NITA II": "LVM2",
+          "LVM NITA I": "LVM1",
+          "Fashion BUSS": "FSB",
+          "Beadwork BUSS": "BEAD",
+          "Basketry BUSS": "BASK",
+          "Other": "OTH",
+          "Computer Basic": "COMP",
+          "ICT III": "ICT3",
+          "ICT II": "ICT2",
+          "Dress Making III": "DRM3",
+          "Dress Making II": "DRM2",
+          "Masonry III": "MAS3",
+          "Masonry II": "MAS2",
+          "Masonry I": "MAS1",
+          "Plumbing III": "PLB3",
+          "Plumbing I": "PLB1",
+          "Tailoring III": "TLR3",
+          "Tailoring II": "TLR2",
+          "Carpentry III": "CAR3",
+          "Electrical III": "ELE3",
+          "Electrical II": "ELE2",
+}
+
 GENDERS = ["Male", "Female"]
 
 COMPLETION_MONTHS = ["April", "June", "August", "December"]
@@ -366,6 +437,12 @@ def init_db():
                                         token_hash TEXT PRIMARY KEY,
                                         user_id BIGINT NOT NULL,
                                         expires_at TEXT)""")
+                              conn.execute("""CREATE TABLE IF NOT EXISTS admission_sequences(
+                                        centre_code TEXT NOT NULL,
+                                        course_code TEXT NOT NULL,
+                                        admission_year INTEGER NOT NULL,
+                                        last_number INTEGER NOT NULL,
+                                        PRIMARY KEY(centre_code, course_code, admission_year))""")
                               return
 
                     conn.execute("""CREATE TABLE IF NOT EXISTS users(
@@ -382,6 +459,13 @@ def init_db():
                               token_hash TEXT PRIMARY KEY,
                               user_id INTEGER NOT NULL,
                               expires_at TEXT)""")
+
+                    conn.execute("""CREATE TABLE IF NOT EXISTS admission_sequences(
+                              centre_code TEXT NOT NULL,
+                              course_code TEXT NOT NULL,
+                              admission_year INTEGER NOT NULL,
+                              last_number INTEGER NOT NULL,
+                              PRIMARY KEY(centre_code, course_code, admission_year))""")
 
                     conn.execute("""CREATE TABLE IF NOT EXISTS learners(
 
@@ -686,6 +770,129 @@ def individual_exists(individual_no, conn=None):
                     return connection.execute("SELECT id FROM learners WHERE TRIM(individual_no)=? LIMIT 1", (str(individual_no).strip(),)).fetchone() is not None
 
 
+def course_admission_code(course):
+          course_name = str(course or "").strip().casefold()
+          return next(
+                    (
+                              code
+                              for name, code in COURSE_ADMISSION_CODES.items()
+                              if name.casefold() == course_name
+                    ),
+                    None,
+          )
+
+
+def generate_admission_number(conn, centre, course, year):
+          centre_code = CENTRE_ADMISSION_CODES.get(str(centre or "").strip())
+          course_code = course_admission_code(course)
+          admission_year = safe_int(year)
+          if not centre_code:
+                    raise ValueError(f"No admission-number code is configured for centre {centre!r}.")
+          if not course_code:
+                    raise ValueError(f"No admission-number code is configured for course {course!r}.")
+          if admission_year is None:
+                    raise ValueError(f"Invalid admission year: {year!r}.")
+
+          prefix = f"{centre_code}/{course_code}"
+          existing_ids = conn.execute(
+                    "SELECT individual_no FROM learners WHERE individual_no LIKE ?",
+                    (f"{prefix}%/{admission_year}",),
+          ).fetchall()
+          number_pattern = re.compile(
+                    rf"{re.escape(prefix)}([0-9]+)/{admission_year}"
+          )
+          highest_existing_number = max(
+                    (
+                              int(match.group(1))
+                              for row in existing_ids
+                              if (match := number_pattern.fullmatch(str(row["individual_no"] or "")))
+                    ),
+                    default=0,
+          )
+          result = conn.execute(
+                    """INSERT INTO admission_sequences(
+                              centre_code, course_code, admission_year, last_number
+                    ) VALUES(?,?,?,?)
+                    ON CONFLICT(centre_code, course_code, admission_year)
+                    DO UPDATE SET last_number = CASE
+                              WHEN admission_sequences.last_number >= excluded.last_number
+                              THEN admission_sequences.last_number + 1
+                              ELSE excluded.last_number
+                    END
+                    RETURNING last_number""",
+                    (
+                              centre_code,
+                              course_code,
+                              admission_year,
+                              highest_existing_number + 1,
+                    ),
+          )
+          sequence_number = result.fetchone()["last_number"]
+          return f"{prefix}{sequence_number:03d}/{admission_year}"
+
+
+def backfill_missing_admission_numbers(conn, actor):
+          conn.execute("BEGIN IMMEDIATE")
+          missing_rows = conn.execute(
+                    """SELECT * FROM learners
+                    WHERE individual_no IS NULL OR TRIM(individual_no)=''
+                    ORDER BY id"""
+          ).fetchall()
+          generated_count = 0
+          issues = []
+          for row in missing_rows:
+                    centre = str(row["centre"] or "").strip()
+                    course = str(row["course"] or "").strip()
+                    admission_year = safe_int(row["year"])
+                    if admission_year is None:
+                              admission_year = datetime.now().year
+                    if centre not in CENTRE_ADMISSION_CODES:
+                              issues.append(
+                                        f"ID {row['id']} ({row['name']}): unsupported centre {centre!r}."
+                              )
+                              continue
+                    if not course_admission_code(course):
+                              issues.append(
+                                        f"ID {row['id']} ({row['name']}): unsupported course {course!r}."
+                              )
+                              continue
+                    if not 2000 <= admission_year <= 2100:
+                              issues.append(
+                                        f"ID {row['id']} ({row['name']}): invalid year {admission_year!r}."
+                              )
+                              continue
+
+                    admission_number = generate_admission_number(
+                              conn,
+                              centre,
+                              course,
+                              admission_year,
+                    )
+                    update_result = conn.execute(
+                              """UPDATE learners SET individual_no=?
+                              WHERE id=? AND
+                              (individual_no IS NULL OR TRIM(individual_no)='')""",
+                              (admission_number, row["id"]),
+                    )
+                    if update_result.rowcount != 1:
+                              continue
+                    updated_row = conn.execute(
+                              "SELECT * FROM learners WHERE id=?",
+                              (row["id"],),
+                    ).fetchone()
+                    record_audit(
+                              conn,
+                              actor,
+                              "assign_admission_number",
+                              "learner",
+                              row["id"],
+                              row["name"],
+                              before_data=audit_record_values(row),
+                              after_data=audit_record_values(updated_row),
+                    )
+                    generated_count += 1
+          return generated_count, issues
+
 
 
 
@@ -727,7 +934,7 @@ def show_branding():
 
 STUDENT_FORMAT_COLUMNS = [
           "No", "Institutional Identifier", "Name", "Gender", "Age", "Disability",
-          "Nationality", "Location", "Telephone No", "Individial No",
+          "Nationality", "Location", "Telephone No", "Admission Number",
           "Highest Education Level", "Current Course", "KASI", "Duration",
           "Certification", "Remarks", "Sponsor", "School fee", "Payment",
           "Payment Confirmation No", "Reason"
@@ -753,7 +960,7 @@ def excel_template():
 
 def show_student_template_downloads(key_prefix="student_template"):
           """Offer the same approved student-register template wherever student data is handled."""
-          st.caption("Use the same Don Bosco student-register template across registration, uploads, records and reporting.")
+          st.caption("Admission numbers are generated automatically for new records. Uploads may include an existing Admission Number to preserve it.")
           left, right = st.columns(2)
           with left:
                     st.download_button(
@@ -835,7 +1042,7 @@ def student_format_export(frame):
           out["Nationality"] = col("nationality")
           out["Location"] = col("location")
           out["Telephone No"] = col("phone")
-          out["Individial No"] = col("individual_no")
+          out["Admission Number"] = col("individual_no")
           out["Highest Education Level"] = col("education")
           out["Current Course"] = col("course")
           out["KASI"] = col("kasi")
@@ -1805,7 +2012,7 @@ def generate_statistical_report(frame, employment_frame, template_bytes=None):
                     completed_cols = ["centre", "name", "gender", "age", "disability", "nationality", "individual_no", "course", "certification", "completion_month"]
                     completed = completed.reindex(columns=completed_cols)
                     completed["Remarks"] = completed["completion_month"].apply(lambda m: f"Completed in {m}" if pd.notna(m) and str(m).strip() else "Completed; month not specified")
-                    style_and_append(wb["COMPLETED"], "LIVE COMPLETED STUDENTS", ["Remarks", "Centre", "Name", "Gender", "Age", "Disability", "Nationality", "Individual No", "Current Course", "Certification", "Completion Month"], as_excel_rows(completed[["Remarks"] + completed_cols]))
+                    style_and_append(wb["COMPLETED"], "LIVE COMPLETED STUDENTS", ["Remarks", "Centre", "Name", "Gender", "Age", "Disability", "Nationality", "Admission Number", "Current Course", "Certification", "Completion Month"], as_excel_rows(completed[["Remarks"] + completed_cols]))
 
 
 
@@ -1818,7 +2025,7 @@ def generate_statistical_report(frame, employment_frame, template_bytes=None):
                     dropout_cols = ["centre", "name", "gender", "nationality", "individual_no", "course", "year", "dropout_quarter", "dropout_reason"]
                     dropped = dropped.reindex(columns=dropout_cols)
                     dropped["Remarks"] = dropped["dropout_quarter"].apply(lambda q: f"Dropped out {q}" if pd.notna(q) and str(q).strip() else "Dropped out; quarter not specified")
-                    style_and_append(wb["DROP OUTS"], "LIVE DROPOUT RECORDS", ["Remarks", "Centre", "Full Name", "Gender", "Nationality", "Individual No", "Course", "Year/Grade", "Dropout Quarter", "Reason for Dropping"], as_excel_rows(dropped[["Remarks"] + dropout_cols]))
+                    style_and_append(wb["DROP OUTS"], "LIVE DROPOUT RECORDS", ["Remarks", "Centre", "Full Name", "Gender", "Nationality", "Admission Number", "Course", "Year/Grade", "Dropout Quarter", "Reason for Dropping"], as_excel_rows(dropped[["Remarks"] + dropout_cols]))
 
 
 
@@ -1834,7 +2041,7 @@ def generate_statistical_report(frame, employment_frame, template_bytes=None):
 
                     else:
 
-                              employment_headers = ["Individual No", "Graduate Name", "Gender", "Centre", "Course", "Employment Status", "Employer/Business", "Job Title", "Monthly Income"]
+                              employment_headers = ["Admission Number", "Graduate Name", "Gender", "Centre", "Course", "Employment Status", "Employer/Business", "Job Title", "Monthly Income"]
 
                               employment_rows = as_excel_rows(employment_frame[["individual_no", "graduate_name", "gender", "centre", "course", "employment_status", "employer_or_business", "job_title", "monthly_income"]])
 
@@ -2405,7 +2612,11 @@ if page == "Dashboard":
 
                     st.metric("Graduates with tracer records", len(employment_df))
 
-                    st.dataframe(employment_df.head(10), use_container_width=True, hide_index=True)
+                    st.dataframe(
+                              employment_df.head(10).rename(columns={"individual_no": "Admission Number"}),
+                              use_container_width=True,
+                              hide_index=True,
+                    )
 
 
 
@@ -2439,7 +2650,7 @@ elif page == "Register Learner":
                               nationality = st.selectbox("Nationality", NATIONALITIES)
                               location = st.text_input("Location")
                               phone = st.text_input("Telephone No")
-                              individual_no = st.text_input("Individial No")
+                              st.caption("Admission number is generated automatically when this record is saved.")
                     with c3:
                               education = st.selectbox("Highest Education Level", ["None", "No formal education", "Primary", "Secondary", "Craft Certificate", "Artisan", "Trade Test", "National Foundation Certificate", "NTFQ", "KASNEB", "University Certificate", "Diploma", "Degree", "Other"])
                               course = st.selectbox("Current Course", ["Select a course", *COURSES])
@@ -2467,8 +2678,6 @@ elif page == "Register Learner":
                               st.error("Student name is required.")
                     elif course == "Select a course":
                               st.error("Select the student's current course.")
-                    elif individual_no.strip() and individual_exists(individual_no):
-                              st.error("This Individual Number is already registered.")
                     else:
                               try:
                                         parsed_status, parsed_month, parsed_quarter = parse_student_remarks(remarks)
@@ -2490,10 +2699,17 @@ elif page == "Register Learner":
                                                   final_month = None
                                                   final_quarter = None
                                         with get_connection() as conn:
+                                                  conn.execute("BEGIN IMMEDIATE")
+                                                  individual_no = generate_admission_number(
+                                                            conn,
+                                                            institutional_identifier,
+                                                            course,
+                                                            int(year),
+                                                  )
                                                   result = conn.execute("""INSERT INTO learners(
                                                   record_no,institutional_identifier,individual_no,name,gender,age,disability,nationality,location,phone,centre,course,duration,education,certification,status,dropout_reason,year,completion_month,dropout_quarter,created_at,kasi,remarks,sponsor,school_fee,payment,payment_confirmation_no,reason
                                                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id""", (
-                                                  record_no.strip() or None, institutional_identifier, individual_no.strip() or None,
+                                                  record_no.strip() or None, institutional_identifier, individual_no,
                                                   learner_name.strip(), gender, int(age), disability, nationality, location.strip() or None,
                                                   phone.strip() or None, institutional_identifier, course.strip() or None, duration.strip() or None,
                                                   education, certification, final_status, reason.strip() or None, int(year),
@@ -2521,6 +2737,8 @@ elif page == "Register Learner":
                                         st.rerun()
                               except DB_ERRORS as e:
                                         st.error(f"Could not save student: {e}")
+                              except ValueError as e:
+                                        st.error(f"Could not generate an admission number: {e}")
 
 
 # =========================================================
@@ -2560,6 +2778,7 @@ elif page == "Upload Student Data":
                                         "Name":"name", "Full Name":"name", "Gender":"gender", "Age":"age",
                                         "Disability":"disability", "Nationality":"nationality", "Location":"location",
                                         "Telephone No":"phone", "Telephone Number":"phone", "Phone":"phone",
+                                        "Admission Number":"individual_no", "Admission No":"individual_no",
                                         "Individial No":"individual_no", "Individual No":"individual_no", "Individual Number":"individual_no", "Individual ID":"individual_no",
                                         "Highest Education Level":"education", "Education":"education",
                                         "Current Course":"course", "Course":"course", "KASI":"kasi", "Duration":"duration",
@@ -2596,17 +2815,23 @@ elif page == "Upload Student Data":
                               st.write(f"**Rows in file:** {source_rows} · **Rows ready for review:** {len(up)} · **Rows with no name:** {len(unnamed_rows)}")
                               if unnamed_rows:
                                         st.warning("Rows without a Name are not imported. They will be listed in the import issues report.")
-                              st.dataframe(up.head(30), use_container_width=True, hide_index=True)
+                              st.dataframe(
+                                        up.head(30).rename(columns={"individual_no": "Admission Number"}),
+                                        use_container_width=True,
+                                        hide_index=True,
+                              )
                               if st.button("Import Student Data", type="primary", use_container_width=True):
                                         imported, skipped = 0, len(unnamed_rows)
                                         issues = [f"Row {index + 2}: Name is blank." for index in unnamed_rows]
                                         with get_connection() as conn:
+                                                  conn.execute("BEGIN IMMEDIATE")
                                                   for index, row in up.iterrows():
                                                             rownum = index + 2
                                                             def issue(message):
                                                                       issues.append(f"Row {rownum}: {message}")
                                                             name = str(row["name"]).strip()
                                                             individual_no = str(row["individual_no"]).strip()
+                                                            course_val = str(row["course"]).strip()
                                                             centre_val = str(row["institutional_identifier"]).strip()
                                                             if centre_val not in CENTRES:
                                                                       skipped += 1; issue(f"Institutional Identifier must match a centre: {centre_val!r}."); continue
@@ -2639,7 +2864,7 @@ elif page == "Upload Student Data":
                                                             if status_val != "Completed": completion_month_val = ""
                                                             if status_val != "Dropped": dropout_quarter_val = ""
                                                             if individual_no and individual_exists(individual_no, conn):
-                                                                      skipped += 1; issue(f"Individual Number {individual_no!r} already exists."); continue
+                                                                      skipped += 1; issue(f"Admission Number {individual_no!r} already exists."); continue
                                                             record_no = str(row["record_no"]).strip()
                                                             if not individual_no and record_no:
                                                                       existing_register_row = conn.execute(
@@ -2654,15 +2879,32 @@ elif page == "Upload Student Data":
                                                                                 skipped += 1
                                                                                 issue(
                                                                                           f"Register No {record_no!r} for {name!r} at "
-                                                                                          f"{centre_val!r} already exists; no Individual Number was provided."
+                                                                                          f"{centre_val!r} already exists; no Admission Number was provided."
                                                                                 )
                                                                                 continue
                                                             age_val = safe_int(row["age"])
                                                             year_val = safe_int(row["year"])
+                                                            if not str(row["year"]).strip() and not individual_no:
+                                                                      year_val = datetime.now().year
                                                             if str(row["age"]).strip() and (age_val is None or not 1 <= age_val <= 100):
                                                                       skipped += 1; issue("Age must be between 1 and 100."); continue
-                                                            if str(row["year"]).strip() and (year_val is None or not 2000 <= year_val <= 2100):
+                                                            if str(row["year"]).strip() and (
+                                                                      year_val is None or not 2000 <= year_val <= 2100
+                                                            ):
                                                                       skipped += 1; issue("Invalid registration year."); continue
+                                                            if not individual_no and (
+                                                                      year_val is None or not 2000 <= year_val <= 2100
+                                                            ):
+                                                                      skipped += 1; issue("A valid registration year is required to generate an admission number."); continue
+                                                            if not individual_no and not course_admission_code(course_val):
+                                                                      skipped += 1; issue(f"Cannot generate an admission number for course {course_val!r}; select a course from the current course list."); continue
+                                                            if not individual_no:
+                                                                      individual_no = generate_admission_number(
+                                                                                conn,
+                                                                                centre_val,
+                                                                                course_val,
+                                                                                year_val,
+                                                                      )
                                                             reason_val = str(row["reason"]).strip()
                                                             result = conn.execute("""INSERT INTO learners(
                                                             individual_no,name,gender,age,disability,nationality,location,phone,centre,course,duration,education,certification,status,dropout_reason,year,completion_month,dropout_quarter,created_at,record_no,institutional_identifier,kasi,remarks,sponsor,school_fee,payment,payment_confirmation_no,reason
@@ -2670,7 +2912,7 @@ elif page == "Upload Student Data":
                                                             individual_no or None, name, gender_val or None, age_val,
                                                             str(row["disability"]).strip() or None, str(row["nationality"]).strip() or None,
                                                             str(row["location"]).strip() or None, str(row["phone"]).strip() or None,
-                                                            centre_val, str(row["course"]).strip() or None, str(row["duration"]).strip() or None,
+                                                            centre_val, course_val or None, str(row["duration"]).strip() or None,
                                                             str(row["education"]).strip() or None, str(row["certification"]).strip() or None,
                                                             status_val, reason_val or None, year_val,
                                                             completion_month_val or None, dropout_quarter_val or None,
@@ -2756,7 +2998,7 @@ elif page == "Learner Records":
 
                               selected_status = st.selectbox("Filter by Status", ["All"] + STATUSES + ["Completed", "Dropped out"])
 
-                    search = st.text_input("Search by name or Individual Number")
+                    search = st.text_input("Search by name or Admission Number")
 
                     records = df.copy()
 
@@ -2786,7 +3028,11 @@ elif page == "Learner Records":
 
                     st.write(f"**Records found: {len(records)}**")
 
-                    st.dataframe(records, use_container_width=True, hide_index=True)
+                    st.dataframe(
+                              records.rename(columns={"individual_no": "Admission Number"}),
+                              use_container_width=True,
+                              hide_index=True,
+                    )
 
                     export_records = student_format_export(records)
                     st.download_button("Export Filtered Records in Student Register Format (CSV)", export_records.to_csv(index=False).encode("utf-8"), "DBK_Filtered_Student_Records.csv", "text/csv")
@@ -2797,7 +3043,7 @@ elif page == "Learner Records":
                     edit_options = {
                               int(row["id"]): (
                                         f"{row['name']} — {row['centre'] or 'Centre not specified'} — "
-                                        f"{row['individual_no'] or 'No Individual Number'}"
+                                        f"{row['individual_no'] or 'No Admission Number'}"
                               )
                               for _, row in records.iterrows()
                     }
@@ -2871,9 +3117,11 @@ elif page == "Learner Records":
                                                             value=user_centre,
                                                             disabled=True,
                                                   )
-                                        edited_individual_no = st.text_input(
-                                                  "Individual No",
+                                        st.text_input(
+                                                  "Admission Number",
                                                   value=str(selected_row.get("individual_no") or ""),
+                                                  disabled=True,
+                                                  help="Existing admission numbers are preserved. A number is generated when saving a legacy record that does not have one.",
                                         )
                                         current_course = str(selected_row.get("course") or "").strip()
                                         edited_course_options = ["Select a course", *COURSES]
@@ -2938,11 +3186,14 @@ elif page == "Learner Records":
                                         st.error("Age must be a number from 1 to 100.")
                               elif edited_year.strip() and (year_value is None or not 2000 <= year_value <= 2100):
                                         st.error("Registration year must be between 2000 and 2100.")
+                              elif not selected_row.get("individual_no") and not course_admission_code(edited_course):
+                                        st.error("Select a supported course before generating an admission number.")
+                              elif not selected_row.get("individual_no") and edited_centre not in CENTRE_ADMISSION_CODES:
+                                        st.error("Select a supported centre before generating an admission number.")
                               else:
                                         edited_values = {
                                                   "record_no": edited_record_no.strip() or None,
                                                   "institutional_identifier": edited_institutional_identifier.strip() or None,
-                                                  "individual_no": edited_individual_no.strip() or None,
                                                   "name": edited_name.strip(),
                                                   "gender": edited_gender,
                                                   "age": age_value,
@@ -2970,8 +3221,6 @@ elif page == "Learner Records":
                                                   "payment_confirmation_no": edited_payment_confirmation.strip() or None,
                                                   "reason": edited_reason.strip() or None,
                                         }
-                                        editable_columns = tuple(edited_values)
-                                        assignments = ", ".join(f"{column}=?" for column in editable_columns)
                                         try:
                                                   with get_connection() as conn:
                                                             conn.execute("BEGIN IMMEDIATE")
@@ -2985,6 +3234,17 @@ elif page == "Learner Records":
                                                                       raise PermissionError(
                                                                                 "This learner is no longer available in your centre."
                                                                       )
+                                                            if not str(row["individual_no"] or "").strip():
+                                                                      admission_year = year_value or datetime.now().year
+                                                                      edited_values["year"] = admission_year
+                                                                      edited_values["individual_no"] = generate_admission_number(
+                                                                                conn,
+                                                                                edited_values["centre"],
+                                                                                edited_values["course"],
+                                                                                admission_year,
+                                                                      )
+                                                            editable_columns = tuple(edited_values)
+                                                            assignments = ", ".join(f"{column}=?" for column in editable_columns)
                                                             before_values = audit_record_values(row)
                                                             conn.execute(
                                                                       f"UPDATE learners SET {assignments} WHERE id=?",
@@ -3016,6 +3276,88 @@ elif page == "Learner Records":
                                                                       st.rerun()
                                         except LEARNER_UPDATE_ERRORS as error:
                                                   st.error(f"Could not update learner record: {error}")
+                                        except ValueError as error:
+                                                  st.error(f"Could not generate an admission number: {error}")
+
+                    if is_admin:
+                              st.divider()
+                              st.subheader("Generate Missing Admission Numbers")
+                              st.caption(
+                                        "Assign numbers to saved student records that do not have one. "
+                                        "Existing admission numbers are never changed."
+                              )
+                              backfill_result = st.session_state.pop(
+                                        "admission_backfill_result",
+                                        None,
+                              )
+                              if backfill_result:
+                                        if backfill_result["generated"]:
+                                                  st.success(
+                                                            f"Generated admission numbers for "
+                                                            f"{backfill_result['generated']} existing student record(s)."
+                                                  )
+                                        if backfill_result["issues"]:
+                                                  st.warning(
+                                                            f"{len(backfill_result['issues'])} record(s) still need review."
+                                                  )
+                                                  st.dataframe(
+                                                            pd.DataFrame(
+                                                                      {"Records not updated": backfill_result["issues"][:20]}
+                                                            ),
+                                                            use_container_width=True,
+                                                            hide_index=True,
+                                                  )
+                              with get_connection() as conn:
+                                        missing_admission_rows = conn.execute(
+                                                  """SELECT id, name, centre, course, year FROM learners
+                                                  WHERE individual_no IS NULL OR TRIM(individual_no)=''
+                                                  ORDER BY id"""
+                                        ).fetchall()
+                              if not missing_admission_rows:
+                                        st.info("All student records already have an admission number.")
+                              else:
+                                        st.info(
+                                                  f"{len(missing_admission_rows)} existing student record(s) "
+                                                  "do not have an admission number."
+                                        )
+                                        st.dataframe(
+                                                  pd.DataFrame(
+                                                            [dict(row) for row in missing_admission_rows[:20]]
+                                                  ),
+                                                  use_container_width=True,
+                                                  hide_index=True,
+                                        )
+                                        confirm_backfill = st.checkbox(
+                                                  "I confirm generating numbers for all eligible existing records.",
+                                                  key="confirm_admission_number_backfill",
+                                        )
+                                        if st.button(
+                                                  "Generate Missing Admission Numbers",
+                                                  type="primary",
+                                                  disabled=not confirm_backfill,
+                                                  key="generate_missing_admission_numbers",
+                                        ):
+                                                  try:
+                                                            with get_connection() as conn:
+                                                                      generated_count, issues = (
+                                                                                backfill_missing_admission_numbers(
+                                                                                          conn,
+                                                                                          user,
+                                                                                )
+                                                                      )
+                                                            st.session_state["admission_backfill_result"] = {
+                                                                      "generated": generated_count,
+                                                                      "issues": issues,
+                                                            }
+                                                            st.rerun()
+                                                  except DB_ERRORS as error:
+                                                            st.error(
+                                                                      f"Could not generate missing admission numbers: {error}"
+                                                            )
+                                                  except ValueError as error:
+                                                            st.error(
+                                                                      f"Could not generate missing admission numbers: {error}"
+                                                            )
 
                     if is_admin:
                               st.divider()
@@ -3025,7 +3367,7 @@ elif page == "Learner Records":
                                         int(row["id"]): (
                                                   f"ID {int(row['id'])} — {row['name']} — "
                                                   f"{row['centre'] or 'Centre not specified'} — "
-                                                  f"{row['individual_no'] or 'No Individual Number'}"
+                                                  f"{row['individual_no'] or 'No Admission Number'}"
                                         )
                                         for _, row in records.iterrows()
                               }
@@ -3111,7 +3453,7 @@ elif page == "Employment Outcomes":
 
                     with left:
 
-                              individual_no = st.text_input("Individual Number (if available)")
+                              individual_no = st.text_input("Admission Number (if available)")
 
                               graduate_name = st.text_input("Graduate Full Name")
 
@@ -3182,9 +3524,17 @@ elif page == "Employment Outcomes":
 
           else:
 
-                    st.dataframe(employment_df, use_container_width=True, hide_index=True)
-
-                    st.download_button("Download Employment Records CSV", employment_df.to_csv(index=False).encode("utf-8"), "DBK_Employment_Outcomes.csv", "text/csv")
+                    st.dataframe(
+                              employment_df.rename(columns={"individual_no": "Admission Number"}),
+                              use_container_width=True,
+                              hide_index=True,
+                    )
+                    st.download_button(
+                              "Download Employment Records CSV",
+                              employment_df.rename(columns={"individual_no": "Admission Number"}).to_csv(index=False).encode("utf-8"),
+                              "DBK_Employment_Outcomes.csv",
+                              "text/csv",
+                    )
                     if is_admin:
                               st.divider()
                               st.subheader("Delete Employment Records")
