@@ -11,6 +11,11 @@ streamlit run app.py
 
 Without `DATABASE_URL`, the app uses a local `meal.db` SQLite database.
 
+Create an account once, then use **Login** on later visits. The login form's
+**Keep me signed in** option remembers the current device until you log out.
+Use it only on a private device; browsers may clear or limit stored cookies.
+Signing out revokes that device's remembered session.
+
 ## Streamlit Community Cloud + Supabase
 
 The app uses PostgreSQL when `DATABASE_URL` is configured; otherwise, it uses local SQLite. The hosted database is initialized with an empty schema on first startup. The local `meal.db` is not uploaded or copied to the cloud.
@@ -35,5 +40,6 @@ The statistical report generator uses the data-free `END SEPTEMBER 2026 STATISTI
 - Local mode (no `DATABASE_URL`): SQLite in `meal.db`.
 - Hosted mode (`DATABASE_URL` set): PostgreSQL; tables and indexes are initialized at app startup.
 - The two databases are independent. No existing local learner or employment data is migrated automatically.
+- Account records and remembered sign-in sessions are stored in the configured database. Keep `DATABASE_URL` pointed at the same persistent database between deployments.
 - Keep `meal.db`, report workbooks containing personal data, and `.streamlit/secrets.toml` out of Git.
 - New account passwords are stored using PBKDF2-SHA256. Existing legacy password hashes are upgraded after a successful login.

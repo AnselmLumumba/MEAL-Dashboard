@@ -11,7 +11,7 @@ import hashlib
 
 from pathlib import Path
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from io import BytesIO
 
@@ -24,6 +24,7 @@ import os
 import re
 import secrets
 
+from streamlit_cookies_controller import CookieController
 
 
 from openpyxl import load_workbook
@@ -68,17 +69,27 @@ REPORT_TEMPLATE = Path(
 CENTRES = ["DBK", "DB1", "DB2", "DB3", "DB4", "DB Kalobeyei ICT", "DB Kalobeyei Buss"]
 
 COURSES = [
-
-          "Computer Basic", "English Basic", "English Intermediate", "ICT II", "ICT III",
-
-          "Fashion", "Dress Making II", "Dress Making III", "Masonry I", "Masonry II",
-
-          "Masonry III", "Plumbing I", "Plumbing III", "Tailoring II", "Tailoring III",
-
-          "Agriculture", "Carpentry III", "Electrical II", "Electrical III",
-
-          "Secretarial Studies", "Other"
-
+          "Agriculture",
+          "English Basic",
+          "English Intermediate",
+          "Computer Basics",
+          "ICT NITA III, II, I",
+          "Fashion & Design",
+          "Dressmaking NITA III, II, I",
+          "Masonry NITA III, II, I",
+          "Plumbing NITA III, II, I",
+          "Tailoring NITA III, II, I",
+          "Carpentry NITA III, II, I",
+          "Electrical NITA III, II, I",
+          "Secretarial Studies",
+          "Solar NITA III, II, I",
+          "Refrigeration NITA III, II, I",
+          "Welding NITA III, II, I",
+          "LVM NITA III, II, I",
+          "Fashion BUSS",
+          "Beadwork BUSS",
+          "Basketry BUSS",
+          "Other",
 ]
 
 GENDERS = ["Male", "Female"]
@@ -329,6 +340,10 @@ def init_db():
                               conn.execute("CREATE INDEX IF NOT EXISTS idx_learners_individual_no ON learners(individual_no)")
                               conn.execute("CREATE INDEX IF NOT EXISTS idx_change_audit_created_at ON change_audit(created_at)")
                               conn.execute("CREATE INDEX IF NOT EXISTS idx_change_audit_entity ON change_audit(entity_type, entity_id)")
+                              conn.execute("""CREATE TABLE IF NOT EXISTS auth_sessions(
+                                        token_hash TEXT PRIMARY KEY,
+                                        user_id BIGINT NOT NULL,
+                                        expires_at TEXT)""")
                               return
 
                     conn.execute("""CREATE TABLE IF NOT EXISTS users(
@@ -340,6 +355,11 @@ def init_db():
                               role TEXT NOT NULL DEFAULT 'centre_head', centre TEXT,
 
                               approved INTEGER NOT NULL DEFAULT 0, created_at TEXT)""")
+
+                    conn.execute("""CREATE TABLE IF NOT EXISTS auth_sessions(
+                              token_hash TEXT PRIMARY KEY,
+                              user_id INTEGER NOT NULL,
+                              expires_at TEXT)""")
 
                     conn.execute("""CREATE TABLE IF NOT EXISTS learners(
 
@@ -480,6 +500,52 @@ def get_user_by_email(email):
 
                     return conn.execute("SELECT * FROM users WHERE email=?", (email.strip().lower(),)).fetchone()
 
+
+REMEMBER_COOKIE = "meal_dashboard_auth"
+REMEMBER_COOKIE_DAYS = 3650
+
+
+def create_remember_session(user_id):
+          token = secrets.token_urlsafe(32)
+          now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+          with get_connection() as conn:
+                    conn.execute(
+                              "DELETE FROM auth_sessions WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                              (now,),
+                    )
+                    conn.execute(
+                              "INSERT INTO auth_sessions(token_hash,user_id,expires_at) VALUES(?,?,?)",
+                              (
+                                        hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                                        user_id,
+                                        None,
+                              ),
+                    )
+          cookie_expires_at = datetime.now(timezone.utc) + timedelta(days=REMEMBER_COOKIE_DAYS)
+          return token, cookie_expires_at
+
+
+def get_remembered_user(token):
+          token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+          now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+          with get_connection() as conn:
+                    account = conn.execute(
+                              """SELECT users.* FROM auth_sessions
+                              JOIN users ON users.id=auth_sessions.user_id
+                              WHERE auth_sessions.token_hash=?
+                              AND (auth_sessions.expires_at IS NULL OR auth_sessions.expires_at > ?)
+                              AND users.approved=1""",
+                              (token_hash, now),
+                    ).fetchone()
+                    if not account:
+                              conn.execute("DELETE FROM auth_sessions WHERE token_hash=?", (token_hash,))
+                    return account
+
+
+def revoke_remember_session(token):
+          token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+          with get_connection() as conn:
+                    conn.execute("DELETE FROM auth_sessions WHERE token_hash=?", (token_hash,))
 
 
 
@@ -788,7 +854,7 @@ def category_for_course(course, centre=None):
 
           if any(x in c for x in [
                     "masonry", "plumbing", "electrical", "carpentry", "welding",
-                    "solar", "lvm", "ppf", "fitting", "turner",
+                    "solar", "refrigeration", "lvm", "ppf", "fitting", "turner",
           ]):
 
                     return "TECHNICAL COURSES"
@@ -1860,9 +1926,15 @@ def generate_statistical_report(frame, employment_frame, template_bytes=None):
 
 # =========================================================
 
+auth_cookie = CookieController(key="meal_auth_cookie_controller")
+
 if "user" not in st.session_state:
 
-          st.session_state.user = None
+          remembered_token = auth_cookie.get(REMEMBER_COOKIE)
+          remembered_user = get_remembered_user(remembered_token) if remembered_token else None
+          st.session_state.user = dict(remembered_user) if remembered_user else None
+          if remembered_token and not remembered_user:
+                    auth_cookie.remove(REMEMBER_COOKIE, secure=True, same_site="strict")
 
 if "page" not in st.session_state:
 
@@ -1873,6 +1945,11 @@ if "page" not in st.session_state:
 
 
 def logout():
+
+          remembered_token = auth_cookie.get(REMEMBER_COOKIE)
+          if remembered_token:
+                    revoke_remember_session(remembered_token)
+                    auth_cookie.remove(REMEMBER_COOKIE, secure=True, same_site="strict")
 
           st.session_state.user = None
 
@@ -1912,7 +1989,7 @@ if st.session_state.user is None:
                               unsafe_allow_html=True,
                     )
 
-          st.markdown('<div class="welcome-section-title">Access your workspace</div><div class="welcome-section-copy">Sign in to manage learner information and explore programme data, or create an account to request access.</div>', unsafe_allow_html=True)
+          st.markdown('<div class="welcome-section-title">Access your workspace</div><div class="welcome-section-copy">Create an account once, then use Login on future visits. Keep me signed in to avoid logging in again on this device.</div>', unsafe_allow_html=True)
 
           login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
 
@@ -1923,6 +2000,11 @@ if st.session_state.user is None:
                               email = st.text_input("Email address")
 
                               password = st.text_input("Password", type="password")
+
+                              remember_me = st.checkbox(
+                                        "Keep me signed in on this device until I log out",
+                                        value=True,
+                              )
 
                               submitted = st.form_submit_button("Login", use_container_width=True)
 
@@ -1950,6 +2032,25 @@ if st.session_state.user is None:
                                                   st.warning("Your account is awaiting administrator approval.")
 
                                         else:
+
+                                                  if remember_me:
+                                                            remember_token, remember_expires_at = create_remember_session(account["id"])
+                                                            auth_cookie.set(
+                                                                      REMEMBER_COOKIE,
+                                                                      remember_token,
+                                                                      expires=remember_expires_at,
+                                                                      secure=True,
+                                                                      same_site="strict",
+                                                            )
+                                                  else:
+                                                            remembered_token = auth_cookie.get(REMEMBER_COOKIE)
+                                                            if remembered_token:
+                                                                      revoke_remember_session(remembered_token)
+                                                                      auth_cookie.remove(
+                                                                                REMEMBER_COOKIE,
+                                                                                secure=True,
+                                                                                same_site="strict",
+                                                                      )
 
                                                   st.session_state.user = dict(account)
 
@@ -2319,7 +2420,7 @@ elif page == "Register Learner":
                               individual_no = st.text_input("Individial No")
                     with c3:
                               education = st.selectbox("Highest Education Level", ["None", "No formal education", "Primary", "Secondary", "Craft Certificate", "Artisan", "Trade Test", "National Foundation Certificate", "NTFQ", "KASNEB", "University Certificate", "Diploma", "Degree", "Other"])
-                              course = st.text_input("Current Course")
+                              course = st.selectbox("Current Course", ["Select a course", *COURSES])
                               kasi = st.selectbox("KASI", ["No", "Yes", "Not specified"])
                               duration = st.text_input("Duration", placeholder="e.g. 6 Months")
                               certification = st.selectbox("Certification", ["NITA", "TVET/CDACC", "KNEC", "KASNEB", "Internal", "Institutional", "Other", "Not specified"])
@@ -2342,6 +2443,8 @@ elif page == "Register Learner":
           if submitted:
                     if not learner_name.strip():
                               st.error("Student name is required.")
+                    elif course == "Select a course":
+                              st.error("Select the student's current course.")
                     elif individual_no.strip() and individual_exists(individual_no):
                               st.error("This Individual Number is already registered.")
                     else:
@@ -2750,7 +2853,17 @@ elif page == "Learner Records":
                                                   "Individual No",
                                                   value=str(selected_row.get("individual_no") or ""),
                                         )
-                                        edited_course = st.text_input("Current Course", value=str(selected_row.get("course") or ""))
+                                        current_course = str(selected_row.get("course") or "").strip()
+                                        edited_course_options = ["Select a course", *COURSES]
+                                        if current_course and current_course not in edited_course_options:
+                                                  edited_course_options.insert(1, current_course)
+                                        edited_course = st.selectbox(
+                                                  "Current Course",
+                                                  edited_course_options,
+                                                  index=edited_course_options.index(current_course)
+                                                  if current_course in edited_course_options
+                                                  else 0,
+                                        )
                                         edited_duration = st.text_input("Duration", value=str(selected_row.get("duration") or ""))
                                         edited_education = st.text_input("Highest Education Level", value=str(selected_row.get("education") or ""))
                                         edited_certification = st.text_input("Certification", value=str(selected_row.get("certification") or ""))
@@ -2816,7 +2929,9 @@ elif page == "Learner Records":
                                                   "location": edited_location.strip() or None,
                                                   "phone": edited_phone.strip() or None,
                                                   "centre": edited_centre,
-                                                  "course": edited_course.strip() or None,
+                                                  "course": edited_course.strip()
+                                                  if edited_course != "Select a course"
+                                                  else None,
                                                   "duration": edited_duration.strip() or None,
                                                   "education": edited_education.strip() or None,
                                                   "certification": edited_certification.strip() or None,
