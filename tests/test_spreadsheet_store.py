@@ -200,7 +200,7 @@ class GoogleSheetsStoreTests(unittest.TestCase):
         self.assertEqual(
             request.call_args.kwargs["body"]["values"][0],
             [
-                42,
+                "42",
                 "Amina",
                 "amina@example.com",
                 "pbkdf2_hash",
@@ -236,6 +236,26 @@ class GoogleSheetsStoreTests(unittest.TestCase):
         self.assertEqual(
             request.call_args.kwargs["body"]["requests"][0]["deleteDimension"]["range"],
             {"sheetId": 8, "dimension": "ROWS", "startIndex": 1, "endIndex": 2},
+        )
+
+    def test_clears_user_account_rows_without_deleting_headers_or_parsing_ids(self):
+        store = self.make_store()
+        headers = [label for _, label in USER_ACCOUNT_SHEET.fields]
+        rows = [
+            headers,
+            ["2.57517E+18", "Amina", "amina@example.com", "hash", "admin", "DBK", "1", "2026-01-01"],
+        ]
+        with (
+            patch.object(store, "_get_values", return_value=rows),
+            patch.object(store, "_sheet_id", return_value=9),
+            patch.object(store, "_request") as request,
+        ):
+            deleted = store.clear_user_accounts()
+
+        self.assertEqual(deleted, 1)
+        self.assertEqual(
+            request.call_args.kwargs["body"]["requests"][0]["deleteDimension"]["range"],
+            {"sheetId": 9, "dimension": "ROWS", "startIndex": 1, "endIndex": 2},
         )
 
 

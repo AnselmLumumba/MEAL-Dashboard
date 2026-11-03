@@ -544,6 +544,39 @@ class GoogleSheetsStore:
             return True
         return False
 
+    def clear_user_accounts(self) -> int:
+        values = self._get_values(USER_ACCOUNT_SHEET.title)
+        if not values:
+            return 0
+        headers = [str(value).strip() for value in values[0]]
+        if "id" not in self._normalize_headers(USER_ACCOUNT_SHEET, headers).values():
+            raise SpreadsheetStoreError(
+                "The User Accounts tab is missing its Account ID column."
+            )
+        data_row_count = sum(
+            1 for row in values[1:] if any(str(cell).strip() for cell in row)
+        )
+        if data_row_count:
+            self._request(
+                "POST",
+                ":batchUpdate",
+                body={
+                    "requests": [
+                        {
+                            "deleteDimension": {
+                                "range": {
+                                    "sheetId": self._sheet_id(USER_ACCOUNT_SHEET.title),
+                                    "dimension": "ROWS",
+                                    "startIndex": 1,
+                                    "endIndex": len(values),
+                                }
+                            }
+                        }
+                    ]
+                },
+            )
+        return data_row_count
+
     def _append_user_account_row(self, account: dict[str, Any]) -> None:
         values = self._get_values(USER_ACCOUNT_SHEET.title)
         headers = [str(value).strip() for value in values[0]] if values else []
@@ -555,7 +588,8 @@ class GoogleSheetsStore:
         row = []
         for header in headers:
             field = field_by_header.get(header)
-            row.append(self._format_value(account.get(field)) if field else "")
+            value = account.get(field) if field else ""
+            row.append(str(value) if field == "id" and value is not None else self._format_value(value))
         self._request(
             "POST",
             f"/values/{self._range(USER_ACCOUNT_SHEET.title, 'A1')}:append",
