@@ -250,7 +250,7 @@ st.markdown("""
 
 <style>
 
-.stApp{background:#F4F7FB;color:#203047}.block-container{padding-top:1.3rem;padding-bottom:2rem;max-width:1500px}
+.stApp{background:radial-gradient(ellipse at 12% 8%,rgba(201,232,244,.58),transparent 34%),radial-gradient(ellipse at 92% 78%,rgba(225,237,250,.72),transparent 36%),linear-gradient(135deg,#F7FAFF 0%,#EEF5FB 48%,#F8F7F1 100%);color:#203047}.block-container{padding-top:1.3rem;padding-bottom:2rem;max-width:1500px}
 
 h1,h2,h3{color:#12345A!important;font-weight:700!important}
 p,li,label{color:#35475D}
