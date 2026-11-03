@@ -39,12 +39,29 @@ def _send_email(
     message["From"] = sender
     message["To"] = recipient
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
-            server.ehlo()
-            server.starttls(context=ssl.create_default_context())
-            server.ehlo()
-            server.login(sender, password)
-            server.send_message(message)
+        try:
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
+                server.ehlo()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
+                server.login(sender, password)
+                server.send_message(message)
+        except smtplib.SMTPAuthenticationError:
+            raise
+        except (
+            OSError,
+            smtplib.SMTPConnectError,
+            smtplib.SMTPServerDisconnected,
+            TimeoutError,
+        ):
+            with smtplib.SMTP_SSL(
+                "smtp.gmail.com",
+                465,
+                timeout=20,
+                context=ssl.create_default_context(),
+            ) as server:
+                server.login(sender, password)
+                server.send_message(message)
     except smtplib.SMTPAuthenticationError as error:
         raise EmailNotificationError(
             "Gmail rejected the sign-in. Confirm the sender address matches the Google account that created the App Password, and replace it with a current 16-character App Password."
@@ -60,7 +77,7 @@ def _send_email(
         TimeoutError,
     ) as error:
         raise EmailNotificationError(
-            "The app could not connect to Gmail SMTP. Check that outbound SMTP on port 587 is available and try again."
+            "The app could not connect to Gmail SMTP on port 587 or 465. The hosting environment may block outbound email; SMTP credentials cannot fix a blocked network connection."
         ) from error
     except smtplib.SMTPResponseException as error:
         raise EmailNotificationError(

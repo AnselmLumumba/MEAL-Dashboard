@@ -89,13 +89,61 @@ class AccountApprovalEmailTests(unittest.TestCase):
             self.assertNotIn("private provider response", str(raised.exception))
 
     def test_reports_smtp_connection_failure(self):
-        with patch("email_notifications.smtplib.SMTP") as smtp_factory:
+        with (
+            patch("email_notifications.smtplib.SMTP") as smtp_factory,
+            patch(
+                "email_notifications.smtplib.SMTP_SSL",
+                side_effect=OSError("private network error"),
+            ),
+        ):
             smtp_factory.return_value.__enter__.return_value.starttls.side_effect = (
                 smtplib.SMTPServerDisconnected("private provider response")
             )
 
             with self.assertRaisesRegex(
                 EmailNotificationError, "could not connect to Gmail SMTP"
+            ):
+                send_account_approved_email(
+                    "sender@gmail.com",
+                    "gmail-app-password",
+                    "user@example.com",
+                    "Amina",
+                )
+
+    def test_falls_back_to_gmail_ssl_port_when_starttls_connection_fails(self):
+        with (
+            patch("email_notifications.smtplib.SMTP") as smtp_factory,
+            patch("email_notifications.smtplib.SMTP_SSL") as smtp_ssl_factory,
+        ):
+            smtp_factory.return_value.__enter__.return_value.starttls.side_effect = (
+                smtplib.SMTPServerDisconnected("private provider response")
+            )
+            ssl_server = smtp_ssl_factory.return_value.__enter__.return_value
+
+            send_account_approved_email(
+                "sender@gmail.com",
+                "gmail-app-password",
+                "user@example.com",
+                "Amina",
+            )
+
+        smtp_ssl_factory.assert_called_once()
+        self.assertEqual(smtp_ssl_factory.call_args.args[:2], ("smtp.gmail.com", 465))
+        ssl_server.login.assert_called_once_with("sender@gmail.com", "gmail-app-password")
+        ssl_server.send_message.assert_called_once()
+
+    def test_reports_when_both_gmail_smtp_ports_are_unreachable(self):
+        with (
+            patch("email_notifications.smtplib.SMTP") as smtp_factory,
+            patch("email_notifications.smtplib.SMTP_SSL") as smtp_ssl_factory,
+        ):
+            smtp_factory.return_value.__enter__.return_value.starttls.side_effect = (
+                OSError("private network error")
+            )
+            smtp_ssl_factory.side_effect = OSError("private network error")
+
+            with self.assertRaisesRegex(
+                EmailNotificationError, "port 587 or 465"
             ):
                 send_account_approved_email(
                     "sender@gmail.com",

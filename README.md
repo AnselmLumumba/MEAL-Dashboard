@@ -87,7 +87,7 @@ gmail_app_password = "<gmail-app-password>"
 ```
 
 Keep the app password private. Do not commit it to GitHub or paste it into chat. Local development may use the same `[email]` section in the ignored `.streamlit/secrets.toml`.
-An App Password copied with spaces is accepted; the app removes whitespace before SMTP login. Admins can use **User Approvals → Test or resend account email** to test delivery to their own account or resend an approval notice. A successful SMTP submission means Gmail accepted the message, but it may still be filtered into spam.
+An App Password copied with spaces is accepted; the app removes whitespace before SMTP login. The sender tries Gmail STARTTLS on port 587 and falls back to implicit TLS on port 465 if the connection fails. Admins can use **User Approvals → Test or resend account email** to test delivery to their own account or resend an approval notice. A successful SMTP submission means Gmail accepted the message, but it may still be filtered into spam. If both ports are blocked by the hosting environment, use an HTTPS email provider or move the sender to a host that permits SMTP egress.
 
 For local development, add the same `[google_sheets]` and `[gcp_service_account]` sections to the ignored `.streamlit/secrets.toml`. Do not put credentials in the repository. When credentials are absent, accounts and learner/employment records remain in the configured database. Use test records first and confirm the spreadsheet is shared with the service account before entering personal data.
 
