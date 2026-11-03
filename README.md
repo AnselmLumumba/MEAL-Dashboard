@@ -48,5 +48,27 @@ The statistical report generator uses the data-free `END SEPTEMBER 2026 STATISTI
 - Hosted mode (`DATABASE_URL` set): PostgreSQL; tables and indexes are initialized at app startup.
 - The two databases are independent. No existing local learner or employment data is migrated automatically.
 - Account records and remembered sign-in sessions are stored in the configured database. Keep `DATABASE_URL` pointed at the same persistent database between deployments.
+- Learner and employment records can use Google Sheets when the `gcp_service_account` secret is configured; authentication, audit logs, and admission-number sequences remain in the configured database.
 - Keep `meal.db`, report workbooks containing personal data, and `.streamlit/secrets.toml` out of Git.
 - New account passwords are stored using PBKDF2-SHA256. Existing legacy password hashes are upgraded after a successful login.
+
+## Google Sheets records
+
+The app uses the `Learners` and `Employment` tabs in the MEAL spreadsheet for learner and graduate-tracer records. It continues to use the configured PostgreSQL/SQLite database for user accounts, authentication, audit logs, and admission-number sequences. Existing database records are not copied to the spreadsheet automatically.
+
+1. Enable the Google Sheets API in the Google Cloud project associated with the service account.
+2. Add the service-account JSON fields to Streamlit Community Cloud **App settings → Secrets**. Keep the existing `DATABASE_URL` secret, then add:
+
+   ```toml
+   [google_sheets]
+   spreadsheet_id = "<spreadsheet-id>"
+
+   [gcp_service_account]
+   # Copy the service-account JSON fields here locally; never commit credentials.
+   ```
+
+   Include the remaining fields from the service-account JSON file as well. Never commit the credentials or paste them into chat or source code.
+3. Share the spreadsheet with the `client_email` value as an **Editor**. Keep the sheet private and grant access only to authorized staff and the service account.
+4. Deploy/restart the app. On first connection, it verifies the two tab names and appends any missing schema columns, including `Record ID` and `Created At`. Existing columns and learner data are preserved. When service-account credentials are not configured, the app visibly reports that learner and employment records are still using the configured database.
+
+For local development, add the same `[google_sheets]` and `[gcp_service_account]` sections to the ignored `.streamlit/secrets.toml`. Do not put credentials in the repository. Use test records first and confirm the spreadsheet is shared with the service account before entering personal data.

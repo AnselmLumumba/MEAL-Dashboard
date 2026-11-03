@@ -32,6 +32,12 @@ from openpyxl.cell.cell import MergedCell
 
 from openpyxl.styles import Font, PatternFill, Alignment
 
+from spreadsheet_store import (
+          EMPLOYMENT_SHEET,
+          LEARNER_SHEET,
+          GoogleSheetsStore,
+          SpreadsheetStoreError,
+)
 
 
 # =========================================================
@@ -53,6 +59,25 @@ except FileNotFoundError:
 
 if DATABASE_URL and "sslmode=" not in DATABASE_URL:
           DATABASE_URL = f"{DATABASE_URL}{'&' if '?' in DATABASE_URL else '?'}sslmode=require"
+
+DEFAULT_GOOGLE_SHEETS_SPREADSHEET_ID = "1Yjo4wcWA0Kajgz10y5VwCbiECxlDBJq21XbAh9TS5Ew"
+try:
+          GOOGLE_SHEETS_SPREADSHEET_ID = (
+                    st.secrets.get("GOOGLE_SHEETS_SPREADSHEET_ID")
+                    or st.secrets.get("google_sheets", {}).get(
+                              "spreadsheet_id",
+                              DEFAULT_GOOGLE_SHEETS_SPREADSHEET_ID,
+                    )
+          )
+          service_account_settings = st.secrets.get("gcp_service_account")
+          GOOGLE_SHEETS_SERVICE_ACCOUNT = (
+                    dict(service_account_settings.items())
+                    if service_account_settings
+                    else None
+          )
+except (FileNotFoundError, KeyError, AttributeError):
+          GOOGLE_SHEETS_SPREADSHEET_ID = DEFAULT_GOOGLE_SHEETS_SPREADSHEET_ID
+          GOOGLE_SHEETS_SERVICE_ACCOUNT = None
 
 LOGO_FILE = APP_DIR / "ans.png"
 
@@ -200,7 +225,8 @@ STATUSES = ["Ongoing"] + STATUS_DETAILS
 NATIONALITIES = ["South Sudanese", "Sudanese", "Somali", "Ethiopian", "Congolese", "Burundian", "Kenyan", "Other", "Not specified"]
 DB_ERRORS = (sqlite3.Error, psycopg.Error)
 DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError, psycopg.IntegrityError)
-LEARNER_UPDATE_ERRORS = DB_ERRORS + (PermissionError,)
+DATA_ERRORS = DB_ERRORS + (SpreadsheetStoreError,)
+LEARNER_UPDATE_ERRORS = DATA_ERRORS + (PermissionError,)
 REPORT_NATIONALITY_ALIASES = {
           "Sud": {"sudanese", "sudan"},
           "S.Sud": {"south sudanese", "south sudan", "s sudanese", "s sud", "south sadanese"},
@@ -346,6 +372,145 @@ class DatabaseConnection:
                                         self.connection.rollback()
                     finally:
                               self.connection.close()
+
+
+@st.cache_resource(show_spinner=False)
+def _cached_google_sheets_store(spreadsheet_id, credentials_json):
+          store = GoogleSheetsStore(spreadsheet_id, json.loads(credentials_json))
+          store.initialize()
+          return store
+
+
+def get_google_sheets_store():
+          if not GOOGLE_SHEETS_SERVICE_ACCOUNT:
+                    return None
+          if not GOOGLE_SHEETS_SPREADSHEET_ID:
+                    raise SpreadsheetStoreError(
+                              "Set GOOGLE_SHEETS_SPREADSHEET_ID in Streamlit secrets."
+                    )
+          credentials_json = json.dumps(
+                    GOOGLE_SHEETS_SERVICE_ACCOUNT,
+                    sort_keys=True,
+          )
+          return _cached_google_sheets_store(
+                    GOOGLE_SHEETS_SPREADSHEET_ID,
+                    credentials_json,
+          )
+
+
+def google_sheets_is_configured():
+          return bool(GOOGLE_SHEETS_SERVICE_ACCOUNT)
+
+
+def get_record_frame(table):
+          store = get_google_sheets_store()
+          if store is not None:
+                    definition = LEARNER_SHEET if table == "learners" else EMPLOYMENT_SHEET
+                    frame = pd.DataFrame(
+                              store.read_records(table),
+                              columns=definition.field_names,
+                    )
+                    if "id" in frame.columns and not frame.empty:
+                              frame = frame.sort_values("id", ascending=False, kind="stable")
+                    for column in ("id", "age", "year", "graduation_year", "monthly_income"):
+                              if column in frame.columns:
+                                        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+                    return frame.reset_index(drop=True)
+          with get_connection() as conn:
+                    return read_sql_frame(conn, f"SELECT * FROM {table} ORDER BY id DESC")
+
+
+def get_sheet_record(table, record_id):
+          frame = get_record_frame(table)
+          if frame.empty or "id" not in frame.columns:
+                    return None
+          matches = frame[frame["id"].astype(str) == str(record_id)]
+          return matches.iloc[0].to_dict() if not matches.empty else None
+
+
+def insert_record(table, record):
+          store = get_google_sheets_store()
+          if store is not None:
+                    return store.insert_record(table, record)
+          columns = tuple(record)
+          placeholders = ",".join("?" for _ in columns)
+          result = None
+          with get_connection() as conn:
+                    result = conn.execute(
+                              f"INSERT INTO {table}({','.join(columns)}) "
+                              f"VALUES({placeholders}) RETURNING id",
+                              tuple(record[column] for column in columns),
+                    )
+                    inserted_id = result.fetchone()["id"]
+                    saved_record = conn.execute(
+                              f"SELECT * FROM {table} WHERE id=?",
+                              (inserted_id,),
+                    ).fetchone()
+                    conn.commit()
+                    return dict(saved_record)
+
+
+def update_sheet_record(table, record_id, changes, conn=None):
+          store = get_google_sheets_store()
+          if store is not None:
+                    return store.update_record(table, record_id, changes)
+          if conn is not None:
+                    before = conn.execute(
+                              f"SELECT * FROM {table} WHERE id=?",
+                              (record_id,),
+                    ).fetchone()
+                    if before is None:
+                              return None, None
+                    before = dict(before)
+                    assignments = ", ".join(f"{column}=?" for column in changes)
+                    conn.execute(
+                              f"UPDATE {table} SET {assignments} WHERE id=?",
+                              (*changes.values(), record_id),
+                    )
+                    after = conn.execute(
+                              f"SELECT * FROM {table} WHERE id=?",
+                              (record_id,),
+                    ).fetchone()
+                    return before, dict(after)
+          with get_connection() as conn:
+                    before = conn.execute(
+                              f"SELECT * FROM {table} WHERE id=?",
+                              (record_id,),
+                    ).fetchone()
+                    if before is None:
+                              return None, None
+                    before = dict(before)
+                    assignments = ", ".join(f"{column}=?" for column in changes)
+                    conn.execute(
+                              f"UPDATE {table} SET {assignments} WHERE id=?",
+                              (*changes.values(), record_id),
+                    )
+                    after = conn.execute(
+                              f"SELECT * FROM {table} WHERE id=?",
+                              (record_id,),
+                    ).fetchone()
+                    conn.commit()
+                    return before, dict(after)
+
+
+def delete_sheet_records(table, record_ids):
+          store = get_google_sheets_store()
+          if store is not None:
+                    return store.delete_records(table, list(record_ids))
+          if not record_ids:
+                    return []
+          placeholders = ",".join("?" for _ in record_ids)
+          with get_connection() as conn:
+                    rows = conn.execute(
+                              f"SELECT * FROM {table} WHERE id IN ({placeholders})",
+                              tuple(record_ids),
+                    ).fetchall()
+                    conn.execute(
+                              f"DELETE FROM {table} WHERE id IN ({placeholders})",
+                              tuple(record_ids),
+                    )
+                    conn.commit()
+                    return [dict(row) for row in rows]
 
 
 
@@ -658,9 +823,7 @@ def revoke_remember_session(token):
 
 def load_learners():
 
-          with get_connection() as conn:
-
-                    return read_sql_frame(conn, "SELECT * FROM learners ORDER BY id DESC")
+          return get_record_frame("learners")
 
 
 
@@ -668,9 +831,7 @@ def load_learners():
 
 def load_employment():
 
-          with get_connection() as conn:
-
-                    return read_sql_frame(conn, "SELECT * FROM employment ORDER BY id DESC")
+          return get_record_frame("employment")
 
 
 def read_sql_frame(conn, query, parameters=()):
@@ -761,6 +922,13 @@ def individual_exists(individual_no, conn=None):
 
                     return False
 
+          if google_sheets_is_configured():
+                    records = load_learners()
+                    if records.empty or "individual_no" not in records:
+                              return False
+                    target = str(individual_no).strip()
+                    return records["individual_no"].fillna("").astype(str).str.strip().eq(target).any()
+
           if conn is not None:
 
                     return conn.execute("SELECT id FROM learners WHERE TRIM(individual_no)=? LIMIT 1", (str(individual_no).strip(),)).fetchone() is not None
@@ -782,7 +950,7 @@ def course_admission_code(course):
           )
 
 
-def generate_admission_number(conn, centre, course, year):
+def generate_admission_number(conn, centre, course, year, existing_ids=None):
           centre_code = CENTRE_ADMISSION_CODES.get(str(centre or "").strip())
           course_code = course_admission_code(course)
           admission_year = safe_int(year)
@@ -794,18 +962,31 @@ def generate_admission_number(conn, centre, course, year):
                     raise ValueError(f"Invalid admission year: {year!r}.")
 
           prefix = f"{centre_code}/{course_code}"
-          existing_ids = conn.execute(
-                    "SELECT individual_no FROM learners WHERE individual_no LIKE ?",
-                    (f"{prefix}%/{admission_year}",),
-          ).fetchall()
+          if existing_ids is not None:
+                    existing_ids = list(existing_ids)
+          elif google_sheets_is_configured():
+                    learner_records = load_learners()
+                    existing_ids = (
+                              learner_records["individual_no"].dropna().astype(str).tolist()
+                              if "individual_no" in learner_records
+                              else []
+                    )
+          else:
+                    existing_ids = [
+                              row["individual_no"]
+                              for row in conn.execute(
+                                        "SELECT individual_no FROM learners WHERE individual_no LIKE ?",
+                                        (f"{prefix}%/{admission_year}",),
+                              ).fetchall()
+                    ]
           number_pattern = re.compile(
                     rf"{re.escape(prefix)}([0-9]+)/{admission_year}"
           )
           highest_existing_number = max(
                     (
                               int(match.group(1))
-                              for row in existing_ids
-                              if (match := number_pattern.fullmatch(str(row["individual_no"] or "")))
+                              for individual_no in existing_ids
+                              if (match := number_pattern.fullmatch(str(individual_no or "")))
                     ),
                     default=0,
           )
@@ -833,11 +1014,19 @@ def generate_admission_number(conn, centre, course, year):
 
 def backfill_missing_admission_numbers(conn, actor):
           conn.execute("BEGIN IMMEDIATE")
-          missing_rows = conn.execute(
-                    """SELECT * FROM learners
-                    WHERE individual_no IS NULL OR TRIM(individual_no)=''
-                    ORDER BY id"""
-          ).fetchall()
+          if google_sheets_is_configured():
+                    learner_frame = load_learners()
+                    missing_rows = [
+                              row
+                              for row in learner_frame.to_dict(orient="records")
+                              if not str(row.get("individual_no") or "").strip()
+                    ]
+          else:
+                    missing_rows = conn.execute(
+                              """SELECT * FROM learners
+                              WHERE individual_no IS NULL OR TRIM(individual_no)=''
+                              ORDER BY id"""
+                    ).fetchall()
           generated_count = 0
           issues = []
           for row in missing_rows:
@@ -868,18 +1057,28 @@ def backfill_missing_admission_numbers(conn, actor):
                               course,
                               admission_year,
                     )
-                    update_result = conn.execute(
-                              """UPDATE learners SET individual_no=?
-                              WHERE id=? AND
-                              (individual_no IS NULL OR TRIM(individual_no)='')""",
-                              (admission_number, row["id"]),
-                    )
-                    if update_result.rowcount != 1:
-                              continue
-                    updated_row = conn.execute(
-                              "SELECT * FROM learners WHERE id=?",
-                              (row["id"],),
-                    ).fetchone()
+                    if google_sheets_is_configured():
+                              before_row, updated_row = update_sheet_record(
+                                        "learners",
+                                        row["id"],
+                                        {"individual_no": admission_number},
+                                        conn=conn,
+                              )
+                              if before_row is None or str(before_row.get("individual_no") or "").strip():
+                                        continue
+                    else:
+                              update_result = conn.execute(
+                                        """UPDATE learners SET individual_no=?
+                                        WHERE id=? AND
+                                        (individual_no IS NULL OR TRIM(individual_no)='')""",
+                                        (admission_number, row["id"]),
+                              )
+                              if update_result.rowcount != 1:
+                                        continue
+                              updated_row = conn.execute(
+                                        "SELECT * FROM learners WHERE id=?",
+                                        (row["id"],),
+                              ).fetchone()
                     record_audit(
                               conn,
                               actor,
@@ -887,8 +1086,10 @@ def backfill_missing_admission_numbers(conn, actor):
                               "learner",
                               row["id"],
                               row["name"],
-                              before_data=audit_record_values(row),
-                              after_data=audit_record_values(updated_row),
+                              before_data=audit_record_values(row) if hasattr(row, "keys") else row,
+                              after_data=audit_record_values(updated_row)
+                              if hasattr(updated_row, "keys")
+                              else updated_row,
                     )
                     generated_count += 1
           return generated_count, issues
@@ -2190,6 +2391,12 @@ def logout():
 
 if st.session_state.user is None:
 
+          if not google_sheets_is_configured():
+                    st.warning(
+                              "Google Sheets is not connected yet. Learner and employment records "
+                              "are still using the configured database."
+                    )
+
           with get_connection() as conn:
 
                     user_count = conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
@@ -2470,15 +2677,22 @@ if st.sidebar.button(":material/logout: Sign out", key="navigation_logout", use_
 
 # =========================================================
 
-df_all = load_learners()
-
-employment_all = load_employment()
+try:
+          df_all = load_learners()
+          employment_all = load_employment()
+except SpreadsheetStoreError as error:
+          st.error(f"Could not connect to Google Sheets: {error}")
+          st.stop()
 
 df = df_all.copy() if is_admin else df_all[df_all["centre"] == user_centre].copy()
 
 employment_df = employment_all.copy() if is_admin else employment_all[employment_all["centre"] == user_centre].copy()
 
 show_branding()
+if google_sheets_is_configured():
+          st.sidebar.success("Learner and employment storage: Google Sheets")
+else:
+          st.sidebar.warning("Learner and employment storage: database")
 
 
 
@@ -2706,23 +2920,62 @@ elif page == "Register Learner":
                                                             course,
                                                             int(year),
                                                   )
-                                                  result = conn.execute("""INSERT INTO learners(
-                                                  record_no,institutional_identifier,individual_no,name,gender,age,disability,nationality,location,phone,centre,course,duration,education,certification,status,dropout_reason,year,completion_month,dropout_quarter,created_at,kasi,remarks,sponsor,school_fee,payment,payment_confirmation_no,reason
-                                                  ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id""", (
-                                                  record_no.strip() or None, institutional_identifier, individual_no,
-                                                  learner_name.strip(), gender, int(age), disability, nationality, location.strip() or None,
-                                                  phone.strip() or None, institutional_identifier, course.strip() or None, duration.strip() or None,
-                                                  education, certification, final_status, reason.strip() or None, int(year),
-                                                  final_month if final_status == "Completed" and final_month else None,
-                                                  final_quarter if final_status == "Dropped" and final_quarter else None,
-                                                  datetime.now().isoformat(timespec="seconds"), kasi, remarks.strip() or None,
-                                                  sponsor.strip() or None, school_fee.strip() or None, payment.strip() or None,
-                                                  payment_confirmation_no.strip() or None, reason.strip() or None))
-                                                  inserted_id = result.fetchone()["id"]
-                                                  saved_record = conn.execute(
-                                                            "SELECT * FROM learners WHERE id=?",
-                                                            (inserted_id,),
-                                                  ).fetchone()
+                                                  now = datetime.now().isoformat(timespec="seconds")
+                                                  learner_record = {
+                                                            "record_no": record_no.strip() or None,
+                                                            "institutional_identifier": institutional_identifier,
+                                                            "individual_no": individual_no,
+                                                            "name": learner_name.strip(),
+                                                            "gender": gender,
+                                                            "age": int(age),
+                                                            "disability": disability,
+                                                            "nationality": nationality,
+                                                            "location": location.strip() or None,
+                                                            "phone": phone.strip() or None,
+                                                            "centre": institutional_identifier,
+                                                            "course": course.strip() or None,
+                                                            "duration": duration.strip() or None,
+                                                            "education": education,
+                                                            "certification": certification,
+                                                            "status": final_status,
+                                                            "dropout_reason": reason.strip() or None,
+                                                            "year": int(year),
+                                                            "completion_month": final_month
+                                                            if final_status == "Completed" and final_month
+                                                            else None,
+                                                            "dropout_quarter": final_quarter
+                                                            if final_status == "Dropped" and final_quarter
+                                                            else None,
+                                                            "created_at": now,
+                                                            "kasi": kasi,
+                                                            "remarks": remarks.strip() or None,
+                                                            "sponsor": sponsor.strip() or None,
+                                                            "school_fee": school_fee.strip() or None,
+                                                            "payment": payment.strip() or None,
+                                                            "payment_confirmation_no": payment_confirmation_no.strip() or None,
+                                                            "reason": reason.strip() or None,
+                                                  }
+                                                  sheet_store = get_google_sheets_store()
+                                                  if sheet_store is not None:
+                                                            saved_record = sheet_store.insert_record(
+                                                                      "learners",
+                                                                      learner_record,
+                                                            )
+                                                            inserted_id = saved_record["id"]
+                                                  else:
+                                                            columns = tuple(learner_record)
+                                                            result = conn.execute(
+                                                                      f"INSERT INTO learners({','.join(columns)}) "
+                                                                      f"VALUES({','.join('?' for _ in columns)}) RETURNING id",
+                                                                      tuple(learner_record[column] for column in columns),
+                                                            )
+                                                            inserted_id = result.fetchone()["id"]
+                                                            saved_record = dict(
+                                                                      conn.execute(
+                                                                                "SELECT * FROM learners WHERE id=?",
+                                                                                (inserted_id,),
+                                                                      ).fetchone()
+                                                            )
                                                   record_audit(
                                                             conn,
                                                             user,
@@ -2735,7 +2988,7 @@ elif page == "Register Learner":
                                                   conn.commit()
                                         st.success("Student record saved successfully.")
                                         st.rerun()
-                              except DB_ERRORS as e:
+                              except DATA_ERRORS as e:
                                         st.error(f"Could not save student: {e}")
                               except ValueError as e:
                                         st.error(f"Could not generate an admission number: {e}")
@@ -2825,6 +3078,25 @@ elif page == "Upload Student Data":
                                         issues = [f"Row {index + 2}: Name is blank." for index in unnamed_rows]
                                         with get_connection() as conn:
                                                   conn.execute("BEGIN IMMEDIATE")
+                                                  sheet_store = get_google_sheets_store()
+                                                  if sheet_store is not None:
+                                                            existing_records = load_learners().to_dict(orient="records")
+                                                            existing_numbers = {
+                                                                      str(existing.get("individual_no") or "").strip()
+                                                                      for existing in existing_records
+                                                                      if str(existing.get("individual_no") or "").strip()
+                                                            }
+                                                            existing_register_rows = {
+                                                                      (
+                                                                                str(existing.get("record_no") or "").strip().casefold(),
+                                                                                str(existing.get("name") or "").strip().casefold(),
+                                                                                str(existing.get("centre") or "").strip().casefold(),
+                                                                      )
+                                                                      for existing in existing_records
+                                                            }
+                                                  else:
+                                                            existing_numbers = set()
+                                                            existing_register_rows = set()
                                                   for index, row in up.iterrows():
                                                             rownum = index + 2
                                                             def issue(message):
@@ -2863,18 +3135,31 @@ elif page == "Upload Student Data":
                                                                       skipped += 1; issue("Dropout Quarter must be Q1, Q2, Q3 or Q4."); continue
                                                             if status_val != "Completed": completion_month_val = ""
                                                             if status_val != "Dropped": dropout_quarter_val = ""
-                                                            if individual_no and individual_exists(individual_no, conn):
+                                                            if individual_no and (
+                                                                      individual_no in existing_numbers
+                                                                      if sheet_store is not None
+                                                                      else individual_exists(individual_no, conn)
+                                                            ):
                                                                       skipped += 1; issue(f"Admission Number {individual_no!r} already exists."); continue
                                                             record_no = str(row["record_no"]).strip()
                                                             if not individual_no and record_no:
-                                                                      existing_register_row = conn.execute(
-                                                                                """SELECT id FROM learners
-                                                                                WHERE LOWER(TRIM(COALESCE(record_no,'')))=LOWER(?)
-                                                                                AND LOWER(TRIM(COALESCE(name,'')))=LOWER(?)
-                                                                                AND LOWER(TRIM(COALESCE(centre,'')))=LOWER(?)
-                                                                                LIMIT 1""",
-                                                                                (record_no, name, centre_val),
-                                                                      ).fetchone()
+                                                                      existing_register_row = (
+                                                                                (
+                                                                                          record_no.casefold(),
+                                                                                          name.casefold(),
+                                                                                          centre_val.casefold(),
+                                                                                )
+                                                                                in existing_register_rows
+                                                                                if sheet_store is not None
+                                                                                else conn.execute(
+                                                                                          """SELECT id FROM learners
+                                                                                          WHERE LOWER(TRIM(COALESCE(record_no,'')))=LOWER(?)
+                                                                                          AND LOWER(TRIM(COALESCE(name,'')))=LOWER(?)
+                                                                                          AND LOWER(TRIM(COALESCE(centre,'')))=LOWER(?)
+                                                                                          LIMIT 1""",
+                                                                                          (record_no, name, centre_val),
+                                                                                ).fetchone()
+                                                                      )
                                                                       if existing_register_row:
                                                                                 skipped += 1
                                                                                 issue(
@@ -2904,28 +3189,70 @@ elif page == "Upload Student Data":
                                                                                 centre_val,
                                                                                 course_val,
                                                                                 year_val,
+                                                                                existing_ids=existing_numbers
+                                                                                if sheet_store is not None
+                                                                                else None,
                                                                       )
                                                             reason_val = str(row["reason"]).strip()
-                                                            result = conn.execute("""INSERT INTO learners(
-                                                            individual_no,name,gender,age,disability,nationality,location,phone,centre,course,duration,education,certification,status,dropout_reason,year,completion_month,dropout_quarter,created_at,record_no,institutional_identifier,kasi,remarks,sponsor,school_fee,payment,payment_confirmation_no,reason
-                                                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id""", (
-                                                            individual_no or None, name, gender_val or None, age_val,
-                                                            str(row["disability"]).strip() or None, str(row["nationality"]).strip() or None,
-                                                            str(row["location"]).strip() or None, str(row["phone"]).strip() or None,
-                                                            centre_val, course_val or None, str(row["duration"]).strip() or None,
-                                                            str(row["education"]).strip() or None, str(row["certification"]).strip() or None,
-                                                            status_val, reason_val or None, year_val,
-                                                            completion_month_val or None, dropout_quarter_val or None,
-                                                            datetime.now().isoformat(timespec="seconds"), record_no or None,
-                                                            centre_val, str(row["kasi"]).strip() or None, str(row["remarks"]).strip() or None,
-                                                            str(row["sponsor"]).strip() or None, str(row["school_fee"]).strip() or None,
-                                                            str(row["payment"]).strip() or None, str(row["payment_confirmation_no"]).strip() or None,
-                                                            reason_val or None))
-                                                            inserted_id = result.fetchone()["id"]
-                                                            saved_record = conn.execute(
-                                                                      "SELECT * FROM learners WHERE id=?",
-                                                                      (inserted_id,),
-                                                            ).fetchone()
+                                                            learner_record = {
+                                                                      "individual_no": individual_no or None,
+                                                                      "name": name,
+                                                                      "gender": gender_val or None,
+                                                                      "age": age_val,
+                                                                      "disability": str(row["disability"]).strip() or None,
+                                                                      "nationality": str(row["nationality"]).strip() or None,
+                                                                      "location": str(row["location"]).strip() or None,
+                                                                      "phone": str(row["phone"]).strip() or None,
+                                                                      "centre": centre_val,
+                                                                      "course": course_val or None,
+                                                                      "duration": str(row["duration"]).strip() or None,
+                                                                      "education": str(row["education"]).strip() or None,
+                                                                      "certification": str(row["certification"]).strip() or None,
+                                                                      "status": status_val,
+                                                                      "dropout_reason": reason_val or None,
+                                                                      "year": year_val,
+                                                                      "completion_month": completion_month_val or None,
+                                                                      "dropout_quarter": dropout_quarter_val or None,
+                                                                      "created_at": datetime.now().isoformat(timespec="seconds"),
+                                                                      "record_no": record_no or None,
+                                                                      "institutional_identifier": centre_val,
+                                                                      "kasi": str(row["kasi"]).strip() or None,
+                                                                      "remarks": str(row["remarks"]).strip() or None,
+                                                                      "sponsor": str(row["sponsor"]).strip() or None,
+                                                                      "school_fee": str(row["school_fee"]).strip() or None,
+                                                                      "payment": str(row["payment"]).strip() or None,
+                                                                      "payment_confirmation_no": str(row["payment_confirmation_no"]).strip() or None,
+                                                                      "reason": reason_val or None,
+                                                            }
+                                                            if sheet_store is not None:
+                                                                      saved_record = sheet_store.insert_record(
+                                                                                "learners",
+                                                                                learner_record,
+                                                                      )
+                                                            else:
+                                                                      columns = tuple(learner_record)
+                                                                      result = conn.execute(
+                                                                                f"INSERT INTO learners({','.join(columns)}) "
+                                                                                f"VALUES({','.join('?' for _ in columns)}) RETURNING id",
+                                                                                tuple(learner_record[column] for column in columns),
+                                                                      )
+                                                                      inserted_id = result.fetchone()["id"]
+                                                                      saved_record = dict(
+                                                                                conn.execute(
+                                                                                          "SELECT * FROM learners WHERE id=?",
+                                                                                          (inserted_id,),
+                                                                                ).fetchone()
+                                                                      )
+                                                            inserted_id = saved_record["id"]
+                                                            if individual_no:
+                                                                      existing_numbers.add(individual_no)
+                                                            existing_register_rows.add(
+                                                                      (
+                                                                                record_no.casefold(),
+                                                                                name.casefold(),
+                                                                                centre_val.casefold(),
+                                                                      )
+                                                            )
                                                             record_audit(
                                                                       conn,
                                                                       user,
@@ -2959,7 +3286,7 @@ elif page == "Upload Student Data":
                                                   "issues": issues,
                                         }
                                         st.rerun()
-                    except Exception as e:
+                    except DATA_ERRORS + (ValueError,) as e:
                               st.error(f"Could not read the uploaded file: {e}")
 
 
@@ -3224,10 +3551,16 @@ elif page == "Learner Records":
                                         try:
                                                   with get_connection() as conn:
                                                             conn.execute("BEGIN IMMEDIATE")
-                                                            row = conn.execute(
-                                                                      "SELECT * FROM learners WHERE id=?",
-                                                                      (int(selected_edit_id),),
-                                                            ).fetchone()
+                                                            if get_google_sheets_store() is not None:
+                                                                      row = get_sheet_record(
+                                                                                "learners",
+                                                                                int(selected_edit_id),
+                                                                      )
+                                                            else:
+                                                                      row = conn.execute(
+                                                                                "SELECT * FROM learners WHERE id=?",
+                                                                                (int(selected_edit_id),),
+                                                                      ).fetchone()
                                                             if row is None or (
                                                                       not is_admin and row["centre"] != user_centre
                                                             ):
@@ -3244,17 +3577,26 @@ elif page == "Learner Records":
                                                                                 admission_year,
                                                                       )
                                                             editable_columns = tuple(edited_values)
-                                                            assignments = ", ".join(f"{column}=?" for column in editable_columns)
-                                                            before_values = audit_record_values(row)
-                                                            conn.execute(
-                                                                      f"UPDATE learners SET {assignments} WHERE id=?",
-                                                                      (*[edited_values[column] for column in editable_columns], int(selected_edit_id)),
+                                                            before_values = (
+                                                                      audit_record_values(row)
+                                                                      if hasattr(row, "keys")
+                                                                      else dict(row)
                                                             )
-                                                            after_row = conn.execute(
-                                                                      "SELECT * FROM learners WHERE id=?",
-                                                                      (int(selected_edit_id),),
-                                                            ).fetchone()
-                                                            after_values = audit_record_values(after_row)
+                                                            _, after_row = update_sheet_record(
+                                                                      "learners",
+                                                                      int(selected_edit_id),
+                                                                      edited_values,
+                                                                      conn=conn,
+                                                            )
+                                                            if after_row is None:
+                                                                      raise PermissionError(
+                                                                                "This learner is no longer available."
+                                                                      )
+                                                            after_values = (
+                                                                      audit_record_values(after_row)
+                                                                      if hasattr(after_row, "keys")
+                                                                      else dict(after_row)
+                                                            )
                                                             if before_values == after_values:
                                                                       conn.rollback()
                                                                       st.info("No learner data changed.")
@@ -3307,12 +3649,22 @@ elif page == "Learner Records":
                                                             use_container_width=True,
                                                             hide_index=True,
                                                   )
-                              with get_connection() as conn:
-                                        missing_admission_rows = conn.execute(
-                                                  """SELECT id, name, centre, course, year FROM learners
-                                                  WHERE individual_no IS NULL OR TRIM(individual_no)=''
-                                                  ORDER BY id"""
-                                        ).fetchall()
+                              if google_sheets_is_configured():
+                                        missing_admission_rows = [
+                                                  {
+                                                            column: row.get(column)
+                                                            for column in ("id", "name", "centre", "course", "year")
+                                                  }
+                                                  for row in df_all.to_dict(orient="records")
+                                                  if not str(row.get("individual_no") or "").strip()
+                                        ]
+                              else:
+                                        with get_connection() as conn:
+                                                  missing_admission_rows = conn.execute(
+                                                            """SELECT id, name, centre, course, year FROM learners
+                                                            WHERE individual_no IS NULL OR TRIM(individual_no)=''
+                                                            ORDER BY id"""
+                                                  ).fetchall()
                               if not missing_admission_rows:
                                         st.info("All student records already have an admission number.")
                               else:
@@ -3322,7 +3674,10 @@ elif page == "Learner Records":
                                         )
                                         st.dataframe(
                                                   pd.DataFrame(
-                                                            [dict(row) for row in missing_admission_rows[:20]]
+                                                            [
+                                                                      dict(row) if hasattr(row, "keys") else row
+                                                                      for row in missing_admission_rows[:20]
+                                                            ]
                                                   ),
                                                   use_container_width=True,
                                                   hide_index=True,
@@ -3350,7 +3705,7 @@ elif page == "Learner Records":
                                                                       "issues": issues,
                                                             }
                                                             st.rerun()
-                                                  except DB_ERRORS as error:
+                                                  except DATA_ERRORS as error:
                                                             st.error(
                                                                       f"Could not generate missing admission numbers: {error}"
                                                             )
@@ -3397,38 +3752,61 @@ elif page == "Learner Records":
                                                   if not confirm_student_delete:
                                                             st.error("Confirm the deletion before continuing.")
                                                   else:
-                                                            placeholders = ",".join("?" for _ in selected_student_ids)
-                                                            with get_connection() as conn:
-                                                                      conn.execute("BEGIN IMMEDIATE")
-                                                                      selected_records = conn.execute(
-                                                                                f"SELECT * FROM learners WHERE id IN ({placeholders})",
-                                                                                tuple(selected_student_ids),
-                                                                      ).fetchall()
-                                                                      for selected_record in selected_records:
-                                                                                record_audit(
-                                                                                          conn,
-                                                                                          user,
-                                                                                          "delete",
-                                                                                          "learner",
-                                                                                          selected_record["id"],
-                                                                                          selected_record["name"],
-                                                                                          before_data=audit_record_values(selected_record),
-                                                                                )
-                                                                      result = conn.execute(
-                                                                                f"DELETE FROM learners WHERE id IN ({placeholders})",
-                                                                                tuple(selected_student_ids),
-                                                                      )
-                                                                      if result.rowcount == len(selected_student_ids):
-                                                                                conn.commit()
+                                                            try:
+                                                                      if google_sheets_is_configured():
+                                                                                          deleted_records = get_google_sheets_store().delete_records(
+                                                                                                    "learners",
+                                                                                                    selected_student_ids,
+                                                                                          )
+                                                                                          with get_connection() as conn:
+                                                                                                    for selected_record in deleted_records:
+                                                                                                              record_audit(
+                                                                                                                        conn,
+                                                                                                                        user,
+                                                                                                              "delete",
+                                                                                                              "learner",
+                                                                                                              selected_record["id"],
+                                                                                                              selected_record["name"],
+                                                                                                              before_data=selected_record,
+                                                                                                    )
+                                                                                          conn.commit()
                                                                       else:
-                                                                                conn.rollback()
-                                                            if result.rowcount != len(selected_student_ids):
+                                                                                placeholders = ",".join("?" for _ in selected_student_ids)
+                                                                                with get_connection() as conn:
+                                                                                          conn.execute("BEGIN IMMEDIATE")
+                                                                                          selected_records = conn.execute(
+                                                                                                    f"SELECT * FROM learners WHERE id IN ({placeholders})",
+                                                                                                    tuple(selected_student_ids),
+                                                                                          ).fetchall()
+                                                                                          for selected_record in selected_records:
+                                                                                                    record_audit(
+                                                                                                              conn,
+                                                                                                              user,
+                                                                                                              "delete",
+                                                                                                              "learner",
+                                                                                                              selected_record["id"],
+                                                                                                              selected_record["name"],
+                                                                                                              before_data=audit_record_values(selected_record),
+                                                                                                    )
+                                                                                          result = conn.execute(
+                                                                                                    f"DELETE FROM learners WHERE id IN ({placeholders})",
+                                                                                                    tuple(selected_student_ids),
+                                                                                          )
+                                                                                          if result.rowcount == len(selected_student_ids):
+                                                                                                    conn.commit()
+                                                                                          else:
+                                                                                                    conn.rollback()
+                                                                                deleted_records = [None] * result.rowcount
+                                                            except DATA_ERRORS as error:
+                                                                      st.error(f"Could not delete selected learner records: {error}")
+                                                                      deleted_records = []
+                                                            if len(deleted_records) != len(selected_student_ids):
                                                                       st.error(
                                                                                 f"Expected to delete {len(selected_student_ids)} records, "
-                                                                                f"but deleted {result.rowcount}. Refresh the page and review the remaining records."
+                                                                                f"but deleted {len(deleted_records)}. Refresh and review the remaining records."
                                                                       )
                                                             else:
-                                                                      st.success(f"Deleted {result.rowcount} student record(s).")
+                                                                      st.success(f"Deleted {len(deleted_records)} student record(s).")
                                                                       st.rerun()
 
 
@@ -3491,24 +3869,68 @@ elif page == "Employment Outcomes":
 
                     else:
 
-                              with get_connection() as conn:
-
-                                        result = conn.execute("""INSERT INTO employment(individual_no,graduate_name,gender,centre,course,graduation_year,employment_status,employer_or_business,job_title,monthly_income,phone,follow_up_date,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id""", (individual_no.strip() or None, graduate_name.strip(), gender, centre, course.strip(), int(graduation_year), employment_status, employer.strip(), job_title.strip(), float(monthly_income) if monthly_income else None, phone.strip(), follow_up_date.isoformat(), notes.strip(), datetime.now().isoformat(timespec="seconds")))
-                                        inserted_id = result.fetchone()["id"]
-                                        saved_employment = conn.execute(
-                                                  "SELECT * FROM employment WHERE id=?",
-                                                  (inserted_id,),
-                                        ).fetchone()
-                                        record_audit(
-                                                  conn,
-                                                  user,
-                                                  "create",
-                                                  "employment",
-                                                  inserted_id,
-                                                  graduate_name.strip(),
-                                                  after_data=audit_record_values(saved_employment),
-                                        )
-                                        conn.commit()
+                              employment_record = {
+                                        "individual_no": individual_no.strip() or None,
+                                        "graduate_name": graduate_name.strip(),
+                                        "gender": gender,
+                                        "centre": centre,
+                                        "course": course.strip(),
+                                        "graduation_year": int(graduation_year),
+                                        "employment_status": employment_status,
+                                        "employer_or_business": employer.strip(),
+                                        "job_title": job_title.strip(),
+                                        "monthly_income": float(monthly_income) if monthly_income else None,
+                                        "phone": phone.strip(),
+                                        "follow_up_date": follow_up_date.isoformat(),
+                                        "notes": notes.strip(),
+                                        "created_at": datetime.now().isoformat(timespec="seconds"),
+                              }
+                              try:
+                                        sheet_store = get_google_sheets_store()
+                                        if sheet_store is not None:
+                                                  saved_employment = sheet_store.insert_record(
+                                                            "employment",
+                                                            employment_record,
+                                                  )
+                                                  inserted_id = saved_employment["id"]
+                                                  with get_connection() as conn:
+                                                            record_audit(
+                                                                      conn,
+                                                                      user,
+                                                                      "create",
+                                                                      "employment",
+                                                                      inserted_id,
+                                                                      graduate_name.strip(),
+                                                                      after_data=saved_employment,
+                                                            )
+                                        else:
+                                                  with get_connection() as conn:
+                                                            columns = tuple(employment_record)
+                                                            result = conn.execute(
+                                                                      f"INSERT INTO employment({','.join(columns)}) "
+                                                                      f"VALUES({','.join('?' for _ in columns)}) RETURNING id",
+                                                                      tuple(employment_record[column] for column in columns),
+                                                            )
+                                                            inserted_id = result.fetchone()["id"]
+                                                            saved_employment = dict(
+                                                                      conn.execute(
+                                                                                "SELECT * FROM employment WHERE id=?",
+                                                                                (inserted_id,),
+                                                                      ).fetchone()
+                                                            )
+                                                            record_audit(
+                                                                      conn,
+                                                                      user,
+                                                                      "create",
+                                                                      "employment",
+                                                                      inserted_id,
+                                                                      graduate_name.strip(),
+                                                                      after_data=saved_employment,
+                                                            )
+                                                            conn.commit()
+                              except DATA_ERRORS as error:
+                                        st.error(f"Could not save employment record: {error}")
+                                        st.stop()
 
                               st.success("Employment outcome saved.")
 
@@ -3574,38 +3996,61 @@ elif page == "Employment Outcomes":
                                                   if not confirm_employment_delete:
                                                             st.error("Confirm the deletion before continuing.")
                                                   else:
-                                                            placeholders = ",".join("?" for _ in selected_employment_ids)
-                                                            with get_connection() as conn:
-                                                                      conn.execute("BEGIN IMMEDIATE")
-                                                                      selected_records = conn.execute(
-                                                                                f"SELECT * FROM employment WHERE id IN ({placeholders})",
-                                                                                tuple(selected_employment_ids),
-                                                                      ).fetchall()
-                                                                      for selected_record in selected_records:
-                                                                                record_audit(
-                                                                                          conn,
-                                                                                          user,
-                                                                                          "delete",
+                                                            try:
+                                                                      if google_sheets_is_configured():
+                                                                                deleted_records = get_google_sheets_store().delete_records(
                                                                                           "employment",
-                                                                                          selected_record["id"],
-                                                                                          selected_record["graduate_name"],
-                                                                                          before_data=audit_record_values(selected_record),
+                                                                                          selected_employment_ids,
                                                                                 )
-                                                                      result = conn.execute(
-                                                                                f"DELETE FROM employment WHERE id IN ({placeholders})",
-                                                                                tuple(selected_employment_ids),
-                                                                      )
-                                                                      if result.rowcount == len(selected_employment_ids):
-                                                                                conn.commit()
+                                                                                with get_connection() as conn:
+                                                                                          for selected_record in deleted_records:
+                                                                                                    record_audit(
+                                                                                                              conn,
+                                                                                                              user,
+                                                                                                              "delete",
+                                                                                                              "employment",
+                                                                                                              selected_record["id"],
+                                                                                                              selected_record["graduate_name"],
+                                                                                                              before_data=selected_record,
+                                                                                                    )
+                                                                                          conn.commit()
                                                                       else:
-                                                                                conn.rollback()
-                                                            if result.rowcount != len(selected_employment_ids):
+                                                                                placeholders = ",".join("?" for _ in selected_employment_ids)
+                                                                                with get_connection() as conn:
+                                                                                          conn.execute("BEGIN IMMEDIATE")
+                                                                                          selected_records = conn.execute(
+                                                                                                    f"SELECT * FROM employment WHERE id IN ({placeholders})",
+                                                                                                    tuple(selected_employment_ids),
+                                                                                          ).fetchall()
+                                                                                          for selected_record in selected_records:
+                                                                                                    record_audit(
+                                                                                                              conn,
+                                                                                                              user,
+                                                                                                              "delete",
+                                                                                                              "employment",
+                                                                                                              selected_record["id"],
+                                                                                                              selected_record["graduate_name"],
+                                                                                                              before_data=audit_record_values(selected_record),
+                                                                                                    )
+                                                                                          result = conn.execute(
+                                                                                                    f"DELETE FROM employment WHERE id IN ({placeholders})",
+                                                                                                    tuple(selected_employment_ids),
+                                                                                          )
+                                                                                          deleted_records = [None] * result.rowcount
+                                                                                          if result.rowcount == len(selected_employment_ids):
+                                                                                                    conn.commit()
+                                                                                          else:
+                                                                                                    conn.rollback()
+                                                            except DATA_ERRORS as error:
+                                                                      st.error(f"Could not delete employment records: {error}")
+                                                                      deleted_records = []
+                                                            if len(deleted_records) != len(selected_employment_ids):
                                                                       st.error(
                                                                                 f"Expected to delete {len(selected_employment_ids)} records, "
-                                                                                f"but deleted {result.rowcount}. Refresh the page and review the remaining records."
+                                                                                f"but deleted {len(deleted_records)}. Refresh the page and review the remaining records."
                                                                       )
                                                             else:
-                                                                      st.success(f"Deleted {result.rowcount} employment record(s).")
+                                                                      st.success(f"Deleted {len(deleted_records)} employment record(s).")
                                                                       st.rerun()
 
 
@@ -3915,49 +4360,97 @@ elif page == "Delete All Data" and is_admin:
                     if typed_confirmation != confirmation_phrase or not confirm_all_data_delete:
                               st.error("Enter the exact confirmation phrase and check the confirmation box.")
                     else:
-                              try:
-                                        with get_connection() as conn:
-                                                  conn.execute("BEGIN IMMEDIATE")
-                                                  learner_count = conn.execute("SELECT COUNT(*) FROM learners").fetchone()[0]
-                                                  employment_count = conn.execute("SELECT COUNT(*) FROM employment").fetchone()[0]
-                                                  learner_records = conn.execute("SELECT * FROM learners").fetchall()
-                                                  employment_records = conn.execute("SELECT * FROM employment").fetchall()
-                                                  for learner_record in learner_records:
-                                                            record_audit(
-                                                                      conn,
-                                                                      user,
-                                                                      "delete",
-                                                                      "learner",
-                                                                      learner_record["id"],
-                                                                      learner_record["name"],
-                                                                      before_data=audit_record_values(learner_record),
-                                                                      details={"reason": "administrator deleted all data"},
-                                                            )
-                                                  for employment_record in employment_records:
-                                                            record_audit(
-                                                                      conn,
-                                                                      user,
-                                                                      "delete",
-                                                                      "employment",
-                                                                      employment_record["id"],
-                                                                      employment_record["graduate_name"],
-                                                                      before_data=audit_record_values(employment_record),
-                                                                      details={"reason": "administrator deleted all data"},
-                                                            )
-                                                  deleted_learners = conn.execute("DELETE FROM learners").rowcount
-                                                  deleted_employment = conn.execute("DELETE FROM employment").rowcount
-                                                  if deleted_learners != learner_count or deleted_employment != employment_count:
-                                                            raise sqlite3.DatabaseError(
-                                                                      "Deleted row counts did not match the record counts; the transaction was rolled back."
-                                                            )
-                                                  conn.commit()
-                                        st.success(
-                                                  f"Deleted {deleted_learners} learner record(s) and "
-                                                  f"{deleted_employment} employment outcome record(s). User accounts were kept."
-                                        )
-                                        st.rerun()
-                              except DB_ERRORS as error:
-                                        st.error(f"Could not delete all learner and employment data: {error}")
+                              if google_sheets_is_configured():
+                                        try:
+                                                  deleted_learner_records, deleted_employment_records = (
+                                                            get_google_sheets_store().clear_all_records()
+                                                  )
+                                        except DATA_ERRORS as error:
+                                                  st.error(
+                                                            "Could not delete all learner and employment data "
+                                                            f"from Google Sheets: {error}"
+                                                  )
+                                                  st.stop()
+                                        try:
+                                                  with get_connection() as conn:
+                                                            for learner_record in deleted_learner_records:
+                                                                      record_audit(
+                                                                                conn,
+                                                                                user,
+                                                                                "delete",
+                                                                                "learner",
+                                                                                learner_record["id"],
+                                                                                learner_record.get("name"),
+                                                                                before_data=learner_record,
+                                                                                details={"reason": "administrator deleted all data"},
+                                                                      )
+                                                            for employment_record in deleted_employment_records:
+                                                                      record_audit(
+                                                                                conn,
+                                                                                user,
+                                                                                "delete",
+                                                                                "employment",
+                                                                                employment_record["id"],
+                                                                                employment_record.get("graduate_name"),
+                                                                                before_data=employment_record,
+                                                                                details={"reason": "administrator deleted all data"},
+                                                                      )
+                                                            conn.commit()
+                                        except DB_ERRORS as error:
+                                                  st.error(
+                                                            "Google Sheets data was deleted, but audit logging failed. "
+                                                            f"Contact an administrator before retrying: {error}"
+                                                  )
+                                                  st.stop()
+                                        deleted_learners = len(deleted_learner_records)
+                                        deleted_employment = len(deleted_employment_records)
+                              else:
+                                        try:
+                                                  with get_connection() as conn:
+                                                            conn.execute("BEGIN IMMEDIATE")
+                                                            learner_count = conn.execute("SELECT COUNT(*) FROM learners").fetchone()[0]
+                                                            employment_count = conn.execute("SELECT COUNT(*) FROM employment").fetchone()[0]
+                                                            learner_records = conn.execute("SELECT * FROM learners").fetchall()
+                                                            employment_records = conn.execute("SELECT * FROM employment").fetchall()
+                                                            for learner_record in learner_records:
+                                                                      record_audit(
+                                                                                conn,
+                                                                                user,
+                                                                                "delete",
+                                                                                "learner",
+                                                                                learner_record["id"],
+                                                                                learner_record["name"],
+                                                                                before_data=audit_record_values(learner_record),
+                                                                                details={"reason": "administrator deleted all data"},
+                                                                      )
+                                                            for employment_record in employment_records:
+                                                                      record_audit(
+                                                                                conn,
+                                                                                user,
+                                                                                "delete",
+                                                                                "employment",
+                                                                                employment_record["id"],
+                                                                                employment_record["graduate_name"],
+                                                                                before_data=audit_record_values(employment_record),
+                                                                                details={"reason": "administrator deleted all data"},
+                                                                      )
+                                                            deleted_learners = conn.execute("DELETE FROM learners").rowcount
+                                                            deleted_employment = conn.execute("DELETE FROM employment").rowcount
+                                                            if deleted_learners != learner_count or deleted_employment != employment_count:
+                                                                      raise sqlite3.DatabaseError(
+                                                                                "Deleted row counts did not match the record counts; the transaction was rolled back."
+                                                                      )
+                                                            conn.commit()
+                                        except DB_ERRORS as error:
+                                                  st.error(
+                                                            f"Could not delete all learner and employment data: {error}"
+                                                  )
+                                                  st.stop()
+                              st.success(
+                                        f"Deleted {deleted_learners} learner record(s) and "
+                                        f"{deleted_employment} employment outcome record(s). User accounts were kept."
+                              )
+                              st.rerun()
 
 
 
