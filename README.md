@@ -96,6 +96,8 @@ Keep the OAuth client secret and refresh token private. Do not commit them to Gi
 
 Administrators can use **Notifications** in the sidebar to review account sign-ups, approvals and rejections, learner and employment record changes, imports, and bulk deletions. Notifications are stored in the database until an administrator marks them read. Read status is shared across administrator accounts. The sidebar shows the total unread count; the panel provides per-notification and mark-all actions, with older notifications available through pagination.
 
+On the admin **Delete All Data** page, the separate **Permanently Delete All Users and Learner/Employment Data** action deletes all account rows, learner records, employment outcomes, and remembered sessions. It signs out the active administrator; after the reset, the first account created becomes the administrator. Change History and admin notifications are retained as audit records.
+
 For local development, add the same `[google_sheets]` and `[gcp_service_account]` sections to the ignored `.streamlit/secrets.toml`. Do not put credentials in the repository. When credentials are absent, accounts and learner/employment records remain in the configured database. Use test records first and confirm the spreadsheet is shared with the service account before entering personal data.
 
 ### Nationality values

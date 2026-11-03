@@ -158,6 +158,40 @@ class GoogleSheetsStoreTests(unittest.TestCase):
         request.assert_called_once()
         self.assertEqual(len(request.call_args.kwargs["body"]["requests"]), 2)
 
+    def test_clear_all_data_and_accounts_deletes_all_three_tabs_in_one_batch(self):
+        store = self.make_store()
+        learner_rows = [["Record ID", "Name"], ["21", "Learner"]]
+        employment_rows = [["Record ID", "Graduate Full Name"], ["31", "Graduate"]]
+        account_headers = [label for _, label in USER_ACCOUNT_SHEET.fields]
+        account_rows = [
+            account_headers,
+            ["41", "Admin", "admin@example.com", "hash", "admin", "", "1", "2026-01-01"],
+        ]
+        with (
+            patch.object(
+                store,
+                "_get_values",
+                side_effect=[learner_rows, employment_rows, account_rows],
+            ),
+            patch.object(store, "_sheet_id", side_effect=[1, 2, 3]),
+            patch.object(store, "_request") as request,
+        ):
+            learners, employment, accounts = store.clear_all_data_and_accounts()
+
+        self.assertEqual(learners[0]["id"], "21")
+        self.assertEqual(employment[0]["graduate_name"], "Graduate")
+        self.assertEqual(accounts, 1)
+        request.assert_called_once()
+        ranges = request.call_args.kwargs["body"]["requests"]
+        self.assertEqual(len(ranges), 3)
+        self.assertEqual(
+            {
+                item["deleteDimension"]["range"]["sheetId"]
+                for item in ranges
+            },
+            {1, 2, 3},
+        )
+
     def test_definitions_include_expected_tabs(self):
         self.assertEqual(LEARNER_SHEET.title, "Learners")
         self.assertEqual(EMPLOYMENT_SHEET.title, "Employment")

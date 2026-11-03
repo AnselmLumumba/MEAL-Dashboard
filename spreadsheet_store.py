@@ -626,7 +626,10 @@ class GoogleSheetsStore:
         if not values:
             return 0
         headers = [str(value).strip() for value in values[0]]
-        if "id" not in self._normalize_headers(USER_ACCOUNT_SHEET, headers).values():
+        if (
+            "id"
+            not in self._normalize_headers(USER_ACCOUNT_SHEET, headers).values()
+        ):
             raise SpreadsheetStoreError(
                 "The User Accounts tab is missing its Account ID column."
             )
@@ -878,6 +881,19 @@ class GoogleSheetsStore:
         self,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Delete both data tabs in one Sheets batch, preserving their headers."""
+        learners, employment, _ = self._clear_data_and_accounts(include_accounts=False)
+        return learners, employment
+
+    def clear_all_data_and_accounts(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+        """Delete learner, employment, and account rows in one Sheets batch."""
+        return self._clear_data_and_accounts(include_accounts=True)
+
+    def _clear_data_and_accounts(
+        self,
+        include_accounts: bool,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
         requests_body = []
         removed_records = []
         for table, definition in _DEFINITIONS.items():
@@ -909,6 +925,31 @@ class GoogleSheetsStore:
                     }
                 )
             removed_records.append(records)
+        removed_accounts = 0
+        if include_accounts:
+            values = self._get_values(USER_ACCOUNT_SHEET.title)
+            if values:
+                headers = [str(value).strip() for value in values[0]]
+                if "id" not in self._normalize_headers(USER_ACCOUNT_SHEET, headers).values():
+                    raise SpreadsheetStoreError(
+                        "The User Accounts tab is missing its Account ID column."
+                    )
+                removed_accounts = sum(
+                    1 for row in values[1:] if any(str(cell).strip() for cell in row)
+                )
+                if removed_accounts:
+                    requests_body.append(
+                        {
+                            "deleteDimension": {
+                                "range": {
+                                    "sheetId": self._sheet_id(USER_ACCOUNT_SHEET.title),
+                                    "dimension": "ROWS",
+                                    "startIndex": 1,
+                                    "endIndex": len(values),
+                                }
+                            }
+                        }
+                    )
         if requests_body:
             requests_body.sort(
                 key=lambda request: (
@@ -918,7 +959,7 @@ class GoogleSheetsStore:
                 reverse=True,
             )
             self._request("POST", ":batchUpdate", body={"requests": requests_body})
-        return removed_records[0], removed_records[1]
+        return removed_records[0], removed_records[1], removed_accounts
 
     def _sheet_id(self, title: str) -> int:
         metadata = self._request(

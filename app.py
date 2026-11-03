@@ -2760,6 +2760,10 @@ def logout():
 
 if st.session_state.user is None:
 
+          full_reset_notice = st.session_state.pop("full_reset_notice", None)
+          if full_reset_notice:
+                    st.success(full_reset_notice)
+
           if not google_sheets_is_configured():
                     st.warning(
                               "Google Sheets is not connected yet. Accounts and learner/employment "
@@ -5192,6 +5196,177 @@ elif page == "Delete All Data" and is_admin:
                                                   "The bulk deletion was added to admin notifications.",
                                         )
                               st.rerun()
+
+          st.divider()
+          st.subheader("Delete all accounts and data")
+          st.warning(
+                    "This permanently deletes every learner record, employment outcome, and user account, "
+                    "including your administrator account. All remembered sessions will be revoked. "
+                    "The first account created afterward becomes the administrator. Change History and admin "
+                    "notifications are retained as audit records."
+          )
+          try:
+                    account_count = get_user_count()
+          except DATA_ERRORS as error:
+                    st.error(f"Could not count user accounts before deletion: {error}")
+                    st.stop()
+
+          account_count_col, learner_count_col, employment_count_col = st.columns(3)
+          account_count_col.metric("User accounts to delete", account_count)
+          learner_count_col.metric("Learner records to delete", len(df_all))
+          employment_count_col.metric(
+                    "Employment records to delete", len(employment_all)
+          )
+
+          full_reset_phrase = "DELETE ALL USERS AND LEARNER/EMPLOYMENT DATA"
+          with st.form("delete_all_users_and_data_form"):
+                    typed_full_reset_confirmation = st.text_input(
+                              f"Type {full_reset_phrase} to confirm",
+                              help="This affects every centre and all years.",
+                    )
+                    confirm_full_reset = st.checkbox(
+                              "I understand this deletes every account, including mine, and signs me out."
+                    )
+                    delete_all_users_and_data = st.form_submit_button(
+                              "Permanently Delete All Users and Learner/Employment Data",
+                              type="primary",
+                              width="stretch",
+                    )
+
+          if delete_all_users_and_data:
+                    if (
+                              typed_full_reset_confirmation != full_reset_phrase
+                              or not confirm_full_reset
+                    ):
+                              st.error(
+                                        "Enter the exact confirmation phrase and check the confirmation box."
+                              )
+                    else:
+                              store = get_user_accounts_store()
+                              deleted_learners = 0
+                              deleted_employment = 0
+                              deleted_accounts = 0
+                              if store is not None:
+                                        try:
+                                                  (
+                                                            deleted_learner_records,
+                                                            deleted_employment_records,
+                                                            deleted_accounts,
+                                                  ) = store.clear_all_data_and_accounts()
+                                        except DATA_ERRORS as error:
+                                                  st.error(
+                                                            "Could not delete all learner, employment, and account rows "
+                                                            f"from Google Sheets: {error}"
+                                                  )
+                                                  st.stop()
+                                        try:
+                                                  with get_connection() as conn:
+                                                            for learner_record in deleted_learner_records:
+                                                                      record_audit(
+                                                                                conn,
+                                                                                user,
+                                                                                "delete",
+                                                                                "learner",
+                                                                                learner_record["id"],
+                                                                                learner_record.get("name"),
+                                                                                before_data=learner_record,
+                                                                                details={
+                                                                                          "reason": "administrator deleted all data"
+                                                                                },
+                                                                      )
+                                                            for employment_record in deleted_employment_records:
+                                                                      record_audit(
+                                                                                conn,
+                                                                                user,
+                                                                                "delete",
+                                                                                "employment",
+                                                                                employment_record["id"],
+                                                                                employment_record.get("graduate_name"),
+                                                                                before_data=employment_record,
+                                                                                details={
+                                                                                          "reason": "administrator deleted all data"
+                                                                                },
+                                                                      )
+                                                            conn.execute("DELETE FROM users")
+                                                            conn.execute("DELETE FROM auth_sessions")
+                                                            conn.commit()
+                                        except DB_ERRORS as error:
+                                                  st.error(
+                                                            "Google Sheets rows were deleted, but database account/session cleanup "
+                                                            f"failed: {error}. Resolve this before allowing new sign-ins."
+                                                  )
+                                                  st.stop()
+                                        deleted_learners = len(deleted_learner_records)
+                                        deleted_employment = len(deleted_employment_records)
+                              else:
+                                        try:
+                                                  with get_connection() as conn:
+                                                            conn.execute("BEGIN IMMEDIATE")
+                                                            learner_records = conn.execute(
+                                                                      "SELECT * FROM learners"
+                                                            ).fetchall()
+                                                            employment_records = conn.execute(
+                                                                      "SELECT * FROM employment"
+                                                            ).fetchall()
+                                                            for learner_record in learner_records:
+                                                                      record_audit(
+                                                                                conn,
+                                                                                user,
+                                                                                "delete",
+                                                                                "learner",
+                                                                                learner_record["id"],
+                                                                                learner_record["name"],
+                                                                                before_data=audit_record_values(learner_record),
+                                                                                details={
+                                                                                          "reason": "administrator deleted all data"
+                                                                                },
+                                                                      )
+                                                            for employment_record in employment_records:
+                                                                      record_audit(
+                                                                                conn,
+                                                                                user,
+                                                                                "delete",
+                                                                                "employment",
+                                                                                employment_record["id"],
+                                                                                employment_record["graduate_name"],
+                                                                                before_data=audit_record_values(employment_record),
+                                                                                details={
+                                                                                          "reason": "administrator deleted all data"
+                                                                                },
+                                                                      )
+                                                            deleted_learners = conn.execute(
+                                                                      "DELETE FROM learners"
+                                                            ).rowcount
+                                                            deleted_employment = conn.execute(
+                                                                      "DELETE FROM employment"
+                                                            ).rowcount
+                                                            deleted_accounts = conn.execute(
+                                                                      "DELETE FROM users"
+                                                            ).rowcount
+                                                            conn.execute("DELETE FROM auth_sessions")
+                                                            if (
+                                                                      deleted_learners != len(learner_records)
+                                                                      or deleted_employment != len(employment_records)
+                                                                      or deleted_accounts != account_count
+                                                            ):
+                                                                      raise sqlite3.DatabaseError(
+                                                                                "Deleted row counts did not match the record counts; the transaction was rolled back."
+                                                                      )
+                                                            conn.commit()
+                                        except DB_ERRORS as error:
+                                                  st.error(
+                                                            "Could not delete all users, learner records, and employment outcomes: "
+                                                            f"{error}"
+                                                  )
+                                                  st.stop()
+
+                              st.session_state["full_reset_notice"] = (
+                                        f"Deleted {deleted_accounts} active user account(s), "
+                                        f"{deleted_learners} learner record(s), and "
+                                        f"{deleted_employment} employment outcome record(s). "
+                                        "All accounts were signed out. The first new account will be the administrator."
+                              )
+                              logout()
 
 
 
