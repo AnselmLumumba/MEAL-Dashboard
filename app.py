@@ -369,7 +369,7 @@ def _cached_google_sheets_store(spreadsheet_id, credentials_json, store_version)
           return store
 
 
-GOOGLE_SHEETS_STORE_VERSION = "user-accounts-v1"
+GOOGLE_SHEETS_STORE_VERSION = "learner-name-deduplication-v2"
 
 
 def get_google_sheets_store():
