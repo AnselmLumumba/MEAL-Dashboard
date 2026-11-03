@@ -37,6 +37,7 @@ from spreadsheet_store import (
           LEARNER_SHEET,
           GoogleSheetsStore,
           SpreadsheetStoreError,
+          USER_ACCOUNT_ID_MAX,
 )
 from email_notifications import EmailNotificationError, send_account_approved_email
 
@@ -927,7 +928,7 @@ def register_user(name, email, password, centre):
                               approved = 1 if role == "admin" else 0
                               store.create_user_account(
                                         {
-                                                  "id": secrets.randbelow((1 << 62) - 1) + 1,
+                                                  "id": secrets.randbelow(USER_ACCOUNT_ID_MAX) + 1,
                                                   "name": name.strip(),
                                                   "email": normalized_email,
                                                   "password_hash": hash_password(password),

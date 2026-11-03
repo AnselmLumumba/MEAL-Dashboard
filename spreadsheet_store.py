@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote
 
@@ -17,6 +18,22 @@ import requests
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
 _ID_MAX = (1 << 62) - 1
+USER_ACCOUNT_ID_MAX = 999_999_999_999_999
+
+
+def _parse_user_account_id(value: Any) -> int:
+    try:
+        numeric_id = Decimal(str(value).strip())
+        if (
+            not numeric_id.is_finite()
+            or numeric_id != numeric_id.to_integral_value()
+            or numeric_id < 1
+            or numeric_id > _ID_MAX
+        ):
+            raise ValueError
+        return int(numeric_id)
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise ValueError("Invalid user account ID.") from error
 
 
 class SpreadsheetStoreError(RuntimeError):
@@ -389,7 +406,7 @@ class GoogleSheetsStore:
                 field_by_header,
             )
             try:
-                account["id"] = int(account["id"])
+                account["id"] = _parse_user_account_id(account["id"])
                 approved_value = str(account["approved"]).strip().lower()
                 if approved_value not in {"0", "1", "false", "true"}:
                     raise ValueError
@@ -426,7 +443,7 @@ class GoogleSheetsStore:
     def create_user_account(self, account: dict[str, Any]) -> dict[str, Any]:
         existing = self.read_user_accounts()
         email = str(account.get("email", "")).strip().lower()
-        account_id = int(account["id"])
+        account_id = _parse_user_account_id(account["id"])
         if any(user["email"] == email for user in existing):
             raise SpreadsheetStoreError("This email is already registered.")
         if any(user["id"] == account_id for user in existing):
@@ -470,7 +487,13 @@ class GoogleSheetsStore:
                 raise SpreadsheetStoreError(
                     "The User Accounts tab is missing its Account ID column."
                 )
-            if str(padded[id_index]).strip() != str(account_id):
+            try:
+                row_account_id = _parse_user_account_id(padded[id_index])
+            except ValueError as error:
+                raise SpreadsheetStoreError(
+                    "The User Accounts tab contains an invalid account ID."
+                ) from error
+            if row_account_id != account_id:
                 continue
             normalized_changes = dict(changes)
             if "email" in normalized_changes:
@@ -520,7 +543,13 @@ class GoogleSheetsStore:
             )
         for row_number, row in enumerate(values[1:], start=2):
             padded = row + [""] * (len(headers) - len(row))
-            if str(padded[id_index]).strip() != str(account_id):
+            try:
+                row_account_id = _parse_user_account_id(padded[id_index])
+            except ValueError as error:
+                raise SpreadsheetStoreError(
+                    "The User Accounts tab contains an invalid account ID."
+                ) from error
+            if row_account_id != account_id:
                 continue
             sheet_id = self._sheet_id(USER_ACCOUNT_SHEET.title)
             self._request(
