@@ -375,10 +375,13 @@ class DatabaseConnection:
 
 
 @st.cache_resource(show_spinner=False)
-def _cached_google_sheets_store(spreadsheet_id, credentials_json):
+def _cached_google_sheets_store(spreadsheet_id, credentials_json, store_version):
           store = GoogleSheetsStore(spreadsheet_id, json.loads(credentials_json))
           store.initialize()
           return store
+
+
+GOOGLE_SHEETS_STORE_VERSION = "user-accounts-v1"
 
 
 def get_google_sheets_store():
@@ -395,6 +398,7 @@ def get_google_sheets_store():
           return _cached_google_sheets_store(
                     GOOGLE_SHEETS_SPREADSHEET_ID,
                     credentials_json,
+                    GOOGLE_SHEETS_STORE_VERSION,
           )
 
 
