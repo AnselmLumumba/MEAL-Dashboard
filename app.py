@@ -39,7 +39,11 @@ from spreadsheet_store import (
           SpreadsheetStoreError,
           USER_ACCOUNT_ID_MAX,
 )
-from email_notifications import EmailNotificationError, send_account_approved_email
+from email_notifications import (
+          EmailNotificationError,
+          send_account_approved_email,
+          send_test_email,
+)
 from learner_duplicates import duplicate_learner_records, normalize_learner_name
 from nationality import (
           NATIONALITIES,
@@ -4575,6 +4579,60 @@ elif page == "User Approvals" and is_admin:
                     display_users["approved"] = display_users["approved"].map({1:"Approved", 0:"Pending"})
 
                     st.dataframe(display_users.drop(columns=["id"]), use_container_width=True, hide_index=True)
+
+                    with st.expander("Test or resend account email"):
+                              st.caption(
+                                        "The test message goes to your signed-in account email. "
+                                        "A resend sends the approval confirmation to an approved account."
+                              )
+                              email_settings = st.secrets.get("email", {})
+                              if st.button(
+                                        "Send test email to my account",
+                                        key="test_account_email_delivery",
+                              ):
+                                        try:
+                                                  send_test_email(
+                                                            email_settings.get("gmail_address", ""),
+                                                            email_settings.get("gmail_app_password", ""),
+                                                            str(user["email"]),
+                                                  )
+                                        except EmailNotificationError as error:
+                                                  st.error(f"Email test failed: {error}")
+                                        else:
+                                                  st.success(
+                                                            f"Test email accepted by Gmail for {user['email']}. "
+                                                            "Check your inbox and spam folder."
+                                                  )
+
+                              approved_accounts = users_df[users_df["approved"] == 1]
+                              if not approved_accounts.empty:
+                                        selected_email_account = st.selectbox(
+                                                  "Approved account",
+                                                  approved_accounts.to_dict(orient="records"),
+                                                  format_func=lambda account: (
+                                                            f"{account['name']} — {account['email']}"
+                                                  ),
+                                                  key="resend_approved_account_email",
+                                        )
+                                        if st.button(
+                                                  "Resend approval email",
+                                                  key="resend_account_approval_email",
+                                        ):
+                                                  try:
+                                                            send_account_approved_email(
+                                                                      email_settings.get("gmail_address", ""),
+                                                                      email_settings.get("gmail_app_password", ""),
+                                                                      str(selected_email_account["email"]),
+                                                                      str(selected_email_account["name"]),
+                                                            )
+                                                  except EmailNotificationError as error:
+                                                            st.error(f"Email resend failed: {error}")
+                                                  else:
+                                                            st.success(
+                                                                      f"Approval email accepted by Gmail for "
+                                                                      f"{selected_email_account['email']}. "
+                                                                      "Check the recipient's inbox and spam folder."
+                                                            )
 
                     pending = users_df[(users_df["approved"] == 0) & (users_df["role"] != "admin")]
 

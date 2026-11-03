@@ -5,6 +5,7 @@ from unittest.mock import patch
 from email_notifications import (
     EmailNotificationError,
     send_account_approved_email,
+    send_test_email,
 )
 
 
@@ -32,6 +33,34 @@ class AccountApprovalEmailTests(unittest.TestCase):
     def test_requires_gmail_credentials(self):
         with self.assertRaisesRegex(EmailNotificationError, "not configured"):
             send_account_approved_email("", "", "user@example.com", "Amina")
+
+    def test_strips_google_app_password_display_spaces(self):
+        with patch("email_notifications.smtplib.SMTP") as smtp_factory:
+            server = smtp_factory.return_value.__enter__.return_value
+
+            send_account_approved_email(
+                "sender@gmail.com",
+                "abcd efgh ijkl mnop",
+                "user@example.com",
+                "Amina",
+            )
+
+        server.login.assert_called_once_with("sender@gmail.com", "abcdefghijklmnop")
+
+    def test_sends_test_email_over_tls(self):
+        with patch("email_notifications.smtplib.SMTP") as smtp_factory:
+            server = smtp_factory.return_value.__enter__.return_value
+
+            send_test_email(
+                "sender@gmail.com",
+                "gmail-app-password",
+                "admin@example.com",
+            )
+
+        message = server.send_message.call_args.args[0]
+        self.assertEqual(message["To"], "admin@example.com")
+        self.assertEqual(message["From"], "sender@gmail.com")
+        self.assertIn("delivery test", message["Subject"].lower())
 
     def test_rejects_invalid_recipient(self):
         with self.assertRaisesRegex(EmailNotificationError, "address is invalid"):
