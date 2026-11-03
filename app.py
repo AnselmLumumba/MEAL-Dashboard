@@ -2846,8 +2846,8 @@ if st.session_state.user is None:
                                                             email_settings = st.secrets.get("email", {})
                                                             try:
                                                                       send_account_approved_email(
-                                                                                email_settings.get("gmail_address", ""),
-                                                                                email_settings.get("gmail_app_password", ""),
+                                                                                email_settings.get("resend_api_key", ""),
+                                                                                email_settings.get("resend_from", ""),
                                                                                 signup_email.strip().lower(),
                                                                                 full_name.strip(),
                                                                       )
@@ -4592,15 +4592,15 @@ elif page == "User Approvals" and is_admin:
                               ):
                                         try:
                                                   send_test_email(
-                                                            email_settings.get("gmail_address", ""),
-                                                            email_settings.get("gmail_app_password", ""),
+                                                            email_settings.get("resend_api_key", ""),
+                                                            email_settings.get("resend_from", ""),
                                                             str(user["email"]),
                                                   )
                                         except EmailNotificationError as error:
                                                   st.error(f"Email test failed: {error}")
                                         else:
                                                   st.success(
-                                                            f"Test email accepted by Gmail for {user['email']}. "
+                                                           f"Test email accepted by Resend for {user['email']}. "
                                                             "Check your inbox and spam folder."
                                                   )
 
@@ -4620,8 +4620,8 @@ elif page == "User Approvals" and is_admin:
                                         ):
                                                   try:
                                                             send_account_approved_email(
-                                                                      email_settings.get("gmail_address", ""),
-                                                                      email_settings.get("gmail_app_password", ""),
+                                                                      email_settings.get("resend_api_key", ""),
+                                                                      email_settings.get("resend_from", ""),
                                                                       str(selected_email_account["email"]),
                                                                       str(selected_email_account["name"]),
                                                             )
@@ -4629,7 +4629,7 @@ elif page == "User Approvals" and is_admin:
                                                             st.error(f"Email resend failed: {error}")
                                                   else:
                                                             st.success(
-                                                                      f"Approval email accepted by Gmail for "
+                                                                      f"Approval email accepted by Resend for "
                                                                       f"{selected_email_account['email']}. "
                                                                       "Check the recipient's inbox and spam folder."
                                                             )
@@ -4666,13 +4666,15 @@ elif page == "User Approvals" and is_admin:
                                                                                 else:
                                                                                           email_settings = st.secrets.get("email", {})
                                                                                           sender_email = email_settings.get(
-                                                                                                    "gmail_address", "",
+                                                                                                    "resend_from", "",
                                                                                           )
-                                                                                          app_password = email_settings.get("gmail_app_password", "")
+                                                                                          resend_api_key = email_settings.get(
+                                                                                                    "resend_api_key", "",
+                                                                                          )
                                                                                           try:
                                                                                                     send_account_approved_email(
+                                                                                                              resend_api_key,
                                                                                                               sender_email,
-                                                                                                              app_password,
                                                                                                               str(row["email"]),
                                                                                                               str(row["name"]),
                                                                                                     )

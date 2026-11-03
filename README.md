@@ -78,16 +78,15 @@ The app uses the `Learners` and `Employment` tabs for learner and graduate-trace
 
 The app sends an approval confirmation to the address used during sign-up after an administrator approves the account. The first administrator account is approved immediately and receives the same confirmation. If email delivery fails, the account approval remains successful and the app displays a warning.
 
-For Gmail delivery, enable 2-Step Verification on the sender account, create a Google App Password, and add these values under Streamlit Community Cloud **App settings → Secrets**. Use the app password, not the normal Gmail password:
+The app sends email using the Resend HTTPS API because this deployment cannot reach Gmail SMTP. Create a Resend account, add and verify a domain you control in Resend, and create an API key. Use a sender address on that verified domain; a personal `@gmail.com` address cannot be used as the sender. Add the values under Streamlit Community Cloud **App settings → Secrets**:
 
 ```toml
 [email]
-gmail_address = "mwakazi166@gmail.com"
-gmail_app_password = "<gmail-app-password>"
+resend_api_key = "re_your_api_key"
+resend_from = "notifications@your-verified-domain.org"
 ```
 
-Keep the app password private. Do not commit it to GitHub or paste it into chat. Local development may use the same `[email]` section in the ignored `.streamlit/secrets.toml`.
-An App Password copied with spaces is accepted; the app removes whitespace before SMTP login. The sender tries Gmail STARTTLS on port 587 and falls back to implicit TLS on port 465 if the connection fails. Admins can use **User Approvals → Test or resend account email** to test delivery to their own account or resend an approval notice. A successful SMTP submission means Gmail accepted the message, but it may still be filtered into spam. If both ports are blocked by the hosting environment, use an HTTPS email provider or move the sender to a host that permits SMTP egress.
+Keep the API key private. Do not commit it to GitHub or paste it into chat. Local development may use the same `[email]` section in the ignored `.streamlit/secrets.toml`. Admins can use **User Approvals → Test or resend account email** to test delivery to their own account or resend an approval notice. A successful API response means Resend accepted the message for processing; check inbox and spam folders for delivery.
 
 For local development, add the same `[google_sheets]` and `[gcp_service_account]` sections to the ignored `.streamlit/secrets.toml`. Do not put credentials in the repository. When credentials are absent, accounts and learner/employment records remain in the configured database. Use test records first and confirm the spreadsheet is shared with the service account before entering personal data.
 
