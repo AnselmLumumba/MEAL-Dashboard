@@ -48,7 +48,28 @@ def send_account_approved_email(
             server.ehlo()
             server.login(sender, app_password)
             server.send_message(message)
-    except (OSError, smtplib.SMTPException) as error:
+    except smtplib.SMTPAuthenticationError as error:
         raise EmailNotificationError(
-            "Gmail could not send the approval notification. Check the sender address, app password, and Gmail SMTP access."
+            "Gmail rejected the sign-in. Confirm the sender address matches the Google account that created the App Password, and replace it with a current 16-character App Password."
+        ) from error
+    except smtplib.SMTPRecipientsRefused as error:
+        raise EmailNotificationError(
+            "Gmail rejected the recipient address. Confirm the approved account has a valid email address."
+        ) from error
+    except (
+        OSError,
+        smtplib.SMTPConnectError,
+        smtplib.SMTPServerDisconnected,
+        TimeoutError,
+    ) as error:
+        raise EmailNotificationError(
+            "The app could not connect to Gmail SMTP. Check that outbound SMTP on port 587 is available and try again."
+        ) from error
+    except smtplib.SMTPResponseException as error:
+        raise EmailNotificationError(
+            "Gmail rejected the message. Check the sender account's SMTP access and the recipient address."
+        ) from error
+    except smtplib.SMTPException as error:
+        raise EmailNotificationError(
+            "Gmail could not complete the SMTP request. Check the sender settings and try again."
         ) from error

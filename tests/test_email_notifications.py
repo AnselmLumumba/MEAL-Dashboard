@@ -42,13 +42,32 @@ class AccountApprovalEmailTests(unittest.TestCase):
                 "Amina",
             )
 
-    def test_reports_smtp_failure_without_exposing_provider_response(self):
+    def test_reports_authentication_failure_without_exposing_provider_response(self):
         with patch("email_notifications.smtplib.SMTP") as smtp_factory:
             smtp_factory.return_value.__enter__.return_value.login.side_effect = (
                 smtplib.SMTPAuthenticationError(535, b"private provider response")
             )
 
-            with self.assertRaisesRegex(EmailNotificationError, "Check the sender address"):
+            with self.assertRaisesRegex(
+                EmailNotificationError, "Gmail rejected the sign-in"
+            ) as raised:
+                send_account_approved_email(
+                    "sender@gmail.com",
+                    "gmail-app-password",
+                    "user@example.com",
+                    "Amina",
+                )
+            self.assertNotIn("private provider response", str(raised.exception))
+
+    def test_reports_smtp_connection_failure(self):
+        with patch("email_notifications.smtplib.SMTP") as smtp_factory:
+            smtp_factory.return_value.__enter__.return_value.starttls.side_effect = (
+                smtplib.SMTPServerDisconnected("private provider response")
+            )
+
+            with self.assertRaisesRegex(
+                EmailNotificationError, "could not connect to Gmail SMTP"
+            ):
                 send_account_approved_email(
                     "sender@gmail.com",
                     "gmail-app-password",

@@ -9,6 +9,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote
 
+from learner_duplicates import duplicate_learner_records
+
 import google.auth.exceptions
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.service_account import Credentials
@@ -111,6 +113,7 @@ EMPLOYMENT_SHEET = SheetDefinition(
         ("individual_no", "Admission Number"),
         ("graduate_name", "Graduate Full Name"),
         ("gender", "Gender"),
+        ("nationality", "Nationality"),
         ("centre", "Centre"),
         ("course", "Course Completed"),
         ("graduation_year", "Graduation Year"),
@@ -807,6 +810,63 @@ class GoogleSheetsStore:
             )
             self._request("POST", ":batchUpdate", body={"requests": requests_body})
         return matched
+
+    def delete_duplicate_learner_names(self) -> list[dict[str, Any]]:
+        values = self._get_values(LEARNER_SHEET.title)
+        if not values:
+            return []
+        headers = [str(value).strip() for value in values[0]]
+        field_by_header = self._normalize_headers(LEARNER_SHEET, headers)
+        if "name" not in field_by_header.values():
+            raise SpreadsheetStoreError(
+                "The Learners tab has no recognized Name column."
+            )
+
+        indexed_records = []
+        for row_number, row in enumerate(values[1:], start=2):
+            if not any(str(cell).strip() for cell in row):
+                continue
+            padded = row + [""] * (len(headers) - len(row))
+            record = self._record_from_row(
+                LEARNER_SHEET,
+                headers,
+                padded,
+                field_by_header,
+            )
+            indexed_records.append((row_number, record))
+
+        duplicates = duplicate_learner_records(
+            [record for _, record in indexed_records]
+        )
+        duplicate_records = {id(record) for record in duplicates}
+        duplicate_rows = [
+            (row_number, record)
+            for row_number, record in indexed_records
+            if id(record) in duplicate_records
+        ]
+        if not duplicate_rows:
+            return []
+
+        sheet_id = self._sheet_id(LEARNER_SHEET.title)
+        requests_body = [
+            {
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": row_number - 1,
+                        "endIndex": row_number,
+                    }
+                }
+            }
+            for row_number, _ in sorted(
+                duplicate_rows,
+                key=lambda item: item[0],
+                reverse=True,
+            )
+        ]
+        self._request("POST", ":batchUpdate", body={"requests": requests_body})
+        return [record for _, record in duplicate_rows]
 
     def clear_records(self, table: str) -> list[dict[str, Any]]:
         records = self.read_records(table)

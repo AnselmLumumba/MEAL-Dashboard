@@ -111,6 +111,33 @@ class GoogleSheetsStoreTests(unittest.TestCase):
             [3, 1],
         )
 
+    def test_deletes_duplicate_names_by_sheet_row_position(self):
+        store = self.make_store()
+        rows = [
+            ["Record ID", "Name", "Created At"],
+            ["9223372036854000000", "Amina B.", "2026-01-01"],
+            ["9223372036854000001", "amina b.", "2026-02-01"],
+            ["9223372036854000002", "Other Learner", "2026-01-01"],
+        ]
+        with (
+            patch.object(store, "_get_values", return_value=rows),
+            patch.object(store, "_sheet_id", return_value=7),
+            patch.object(store, "_request") as request,
+        ):
+            deleted = store.delete_duplicate_learner_names()
+
+        self.assertEqual([record["name"] for record in deleted], ["amina b."])
+        requests = request.call_args.kwargs["body"]["requests"]
+        self.assertEqual(
+            requests[0]["deleteDimension"]["range"],
+            {
+                "sheetId": 7,
+                "dimension": "ROWS",
+                "startIndex": 2,
+                "endIndex": 3,
+            },
+        )
+
     def test_clear_all_records_deletes_both_tabs_in_one_batch(self):
         store = self.make_store()
         learner_rows = [["Record ID", "Name"], ["21", "Learner"]]
@@ -134,6 +161,8 @@ class GoogleSheetsStoreTests(unittest.TestCase):
     def test_definitions_include_expected_tabs(self):
         self.assertEqual(LEARNER_SHEET.title, "Learners")
         self.assertEqual(EMPLOYMENT_SHEET.title, "Employment")
+        self.assertIn("nationality", LEARNER_SHEET.field_names)
+        self.assertIn("nationality", EMPLOYMENT_SHEET.field_names)
 
     def test_initializes_user_accounts_tab_without_overwriting_other_tabs(self):
         store = self.make_store()

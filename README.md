@@ -89,3 +89,11 @@ gmail_app_password = "<gmail-app-password>"
 Keep the app password private. Do not commit it to GitHub or paste it into chat. Local development may use the same `[email]` section in the ignored `.streamlit/secrets.toml`.
 
 For local development, add the same `[google_sheets]` and `[gcp_service_account]` sections to the ignored `.streamlit/secrets.toml`. Do not put credentials in the repository. When credentials are absent, accounts and learner/employment records remain in the configured database. Use test records first and confirm the spreadsheet is shared with the service account before entering personal data.
+
+### Nationality values
+
+Learner registration and employment outcome forms use the nationality labels provided by the program, including `Kenyan (Others)` and `Kenyan (Host Community)`. Nationality is saved with both record types. Existing Kenyan and Turkana values remain recognized for reports; Turkana is counted in the Kenyan Host Community category.
+
+### Duplicate learner names
+
+The app treats learner names as duplicates when they match after trimming and collapsing whitespace and ignoring letter case. On an administrator session, it removes existing duplicate learner records from the active learner store once, keeps the earliest-created record, and records the deletions in Change History. Registration and bulk upload reject names that already exist, including repeated names within one upload. Since different learners can share a name, review names carefully before enabling this cleanup on existing records.
