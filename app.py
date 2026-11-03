@@ -2945,7 +2945,9 @@ if st.session_state.user is None:
                                                             email_settings = st.secrets.get("email", {})
                                                             try:
                                                                       send_account_approved_email(
-                                                                                email_settings.get("gmail_app_password", ""),
+                                                                                email_settings.get("gmail_client_id", ""),
+                                                                                email_settings.get("gmail_client_secret", ""),
+                                                                                email_settings.get("gmail_refresh_token", ""),
                                                                                 email_settings.get("gmail_address", ""),
                                                                                 signup_email.strip().lower(),
                                                                                 full_name.strip(),
@@ -4805,7 +4807,9 @@ elif page == "User Approvals" and is_admin:
                               ):
                                         try:
                                                   send_test_email(
-                                                            email_settings.get("gmail_app_password", ""),
+                                                            email_settings.get("gmail_client_id", ""),
+                                                            email_settings.get("gmail_client_secret", ""),
+                                                            email_settings.get("gmail_refresh_token", ""),
                                                             email_settings.get("gmail_address", ""),
                                                             str(user["email"]),
                                                   )
@@ -4833,7 +4837,9 @@ elif page == "User Approvals" and is_admin:
                                         ):
                                                   try:
                                                             send_account_approved_email(
-                                                                      email_settings.get("gmail_app_password", ""),
+                                                                      email_settings.get("gmail_client_id", ""),
+                                                                      email_settings.get("gmail_client_secret", ""),
+                                                                      email_settings.get("gmail_refresh_token", ""),
                                                                       email_settings.get("gmail_address", ""),
                                                                       str(selected_email_account["email"]),
                                                                       str(selected_email_account["name"]),
@@ -4890,12 +4896,20 @@ elif page == "User Approvals" and is_admin:
                                                                                           sender_email = email_settings.get(
                                                                                                     "gmail_address", "",
                                                                                           )
-                                                                                          gmail_app_password = email_settings.get(
-                                                                                                    "gmail_app_password", "",
+                                                                                          gmail_client_id = email_settings.get(
+                                                                                                    "gmail_client_id", "",
+                                                                                          )
+                                                                                          gmail_client_secret = email_settings.get(
+                                                                                                    "gmail_client_secret", "",
+                                                                                          )
+                                                                                          gmail_refresh_token = email_settings.get(
+                                                                                                    "gmail_refresh_token", "",
                                                                                           )
                                                                                           try:
                                                                                                     send_account_approved_email(
-                                                                                                              gmail_app_password,
+                                                                                                              gmail_client_id,
+                                                                                                              gmail_client_secret,
+                                                                                                              gmail_refresh_token,
                                                                                                               sender_email,
                                                                                                               str(row["email"]),
                                                                                                               str(row["name"]),

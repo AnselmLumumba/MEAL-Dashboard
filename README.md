@@ -78,15 +78,19 @@ The app uses the `Learners` and `Employment` tabs for learner and graduate-trace
 
 The app sends an approval confirmation to the address used during sign-up after an administrator approves the account. The first administrator account is approved immediately and receives the same confirmation. If email delivery fails, the account approval remains successful and the app displays a warning.
 
-The app sends email through Gmail SMTP. Turn on 2-Step Verification for the sender's Google account, then create a Google App Password. Add the Gmail address and app password under Streamlit Community Cloud **App settings → Secrets**:
+The app sends email through the Gmail API over HTTPS using OAuth 2.0. In Google Cloud Console, create a project, enable the **Gmail API**, configure the OAuth consent screen, and create an OAuth client ID. Add the OAuth Playground redirect URI (`https://developers.google.com/oauthplayground`) to that client. In [Google OAuth 2.0 Playground](https://developers.google.com/oauthplayground), open its settings, enable **Use your own OAuth credentials**, and enter that client ID and secret. Authorize the scope `https://www.googleapis.com/auth/gmail.send` as the Gmail account that will send mail, then exchange the authorization code for tokens and copy the refresh token. For an app in Testing mode, add the sender as a test user; Google may expire its refresh token after seven days until the consent screen is published to Production.
+
+Add these values under Streamlit Community Cloud **App settings → Secrets**:
 
 ```toml
 [email]
 gmail_address = "your-account@gmail.com"
-gmail_app_password = "your 16-character app password"
+gmail_client_id = "your OAuth client ID"
+gmail_client_secret = "your OAuth client secret"
+gmail_refresh_token = "your OAuth refresh token"
 ```
 
-Keep the app password private. Do not commit it to GitHub or paste it into chat. Local development may use the same `[email]` section in the ignored `.streamlit/secrets.toml`. Admins can use **User Approvals → Test or resend account email** to test delivery to their own account or resend an approval notice. The hosting environment must allow outbound SMTP over port 587; if it blocks SMTP, Gmail delivery cannot work from that host. Check inbox and spam folders for test messages.
+Keep the OAuth client secret and refresh token private. Do not commit them to GitHub or paste them into chat. Local development may use the same `[email]` section in the ignored `.streamlit/secrets.toml`. Admins can use **User Approvals → Test or resend account email** to test delivery to their own account or resend an approval notice. The app exchanges the refresh token for an access token and sends through the Gmail API over HTTPS; no SMTP port or Gmail app password is required. Check inbox and spam folders for test messages.
 
 ### Admin notifications
 
