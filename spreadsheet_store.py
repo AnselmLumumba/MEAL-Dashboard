@@ -621,6 +621,134 @@ class GoogleSheetsStore:
             return True
         return False
 
+    def delete_selected_records_and_accounts(
+        self,
+        delete_learners: bool,
+        delete_employment: bool,
+        account_ids: list[int],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Delete selected data rows and accounts together in one Sheets batch."""
+        selected_account_ids = {_parse_user_account_id(value) for value in account_ids}
+        selected_tables = []
+        if delete_learners:
+            selected_tables.append(("learners", LEARNER_SHEET))
+        if delete_employment:
+            selected_tables.append(("employment", EMPLOYMENT_SHEET))
+
+        requests_body = []
+        deleted_records: dict[str, list[dict[str, Any]]] = {
+            "learners": [],
+            "employment": [],
+        }
+
+        for table, definition in selected_tables:
+            values = self._get_values(definition.title)
+            if not values:
+                continue
+            headers = [str(value).strip() for value in values[0]]
+            field_by_header = self._normalize_headers(definition, headers)
+            sheet_id = None
+            for row_number, row in enumerate(values[1:], start=2):
+                padded = row + [""] * (len(headers) - len(row))
+                if not any(str(cell).strip() for cell in row):
+                    continue
+                deleted_records[table].append(
+                    self._record_from_row(definition, headers, padded, field_by_header)
+                )
+                if sheet_id is None:
+                    sheet_id = self._sheet_id(definition.title)
+                requests_body.append(
+                    {
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "dimension": "ROWS",
+                                "startIndex": row_number - 1,
+                                "endIndex": row_number,
+                            }
+                        }
+                    }
+                )
+
+        deleted_accounts = []
+        if selected_account_ids:
+            values = self._get_values(USER_ACCOUNT_SHEET.title)
+            if values:
+                headers = [str(value).strip() for value in values[0]]
+                field_by_header = self._normalize_headers(USER_ACCOUNT_SHEET, headers)
+                id_index = next(
+                    (
+                        index
+                        for index, header in enumerate(headers)
+                        if field_by_header.get(header) == "id"
+                    ),
+                    None,
+                )
+                if id_index is None:
+                    raise SpreadsheetStoreError(
+                        "The User Accounts tab is missing its Account ID column."
+                    )
+                sheet_id = None
+                for row_number, row in enumerate(values[1:], start=2):
+                    if not any(str(cell).strip() for cell in row):
+                        continue
+                    padded = row + [""] * (len(headers) - len(row))
+                    try:
+                        account_id = _parse_user_account_id(padded[id_index])
+                    except (IndexError, ValueError):
+                        raise SpreadsheetStoreError(
+                            "The User Accounts tab contains an invalid account ID."
+                        ) from None
+                    if account_id not in selected_account_ids:
+                        continue
+                    account = self._record_from_row(
+                        USER_ACCOUNT_SHEET, headers, padded, field_by_header
+                    )
+                    account["id"] = account_id
+                    deleted_accounts.append(account)
+                    if sheet_id is None:
+                        sheet_id = self._sheet_id(USER_ACCOUNT_SHEET.title)
+                    requests_body.append(
+                        {
+                            "deleteDimension": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "dimension": "ROWS",
+                                    "startIndex": row_number - 1,
+                                    "endIndex": row_number,
+                                }
+                            }
+                        }
+                    )
+                missing_account_ids = selected_account_ids - {
+                    account["id"] for account in deleted_accounts
+                }
+                if missing_account_ids:
+                    raise SpreadsheetStoreError(
+                        "One or more selected accounts were not found in the User Accounts tab. "
+                        "Refresh the account list and try again."
+                    )
+            else:
+                raise SpreadsheetStoreError(
+                    "The User Accounts tab is empty. Refresh the account list and try again."
+                )
+
+        if requests_body:
+            requests_body.sort(
+                key=lambda request: (
+                    request["deleteDimension"]["range"]["sheetId"],
+                    request["deleteDimension"]["range"]["startIndex"],
+                ),
+                reverse=True,
+            )
+            self._request("POST", ":batchUpdate", body={"requests": requests_body})
+
+        return (
+            deleted_records["learners"],
+            deleted_records["employment"],
+            deleted_accounts,
+        )
+
     def clear_user_accounts(self) -> int:
         values = self._get_values(USER_ACCOUNT_SHEET.title)
         if not values:

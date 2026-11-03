@@ -192,6 +192,54 @@ class GoogleSheetsStoreTests(unittest.TestCase):
             {1, 2, 3},
         )
 
+    def test_deletes_selected_data_categories_and_specific_accounts(self):
+        store = self.make_store()
+        learner_rows = [["Record ID", "Name"], ["21", "Learner"]]
+        account_headers = [label for _, label in USER_ACCOUNT_SHEET.fields]
+        account_rows = [
+            account_headers,
+            ["41", "Admin", "admin@example.com", "hash", "admin", "", "1", "2026-01-01"],
+            ["42", "Centre Head", "head@example.com", "hash", "centre_head", "DBK", "1", "2026-01-01"],
+        ]
+        with (
+            patch.object(
+                store,
+                "_get_values",
+                side_effect=[learner_rows, account_rows],
+            ),
+            patch.object(store, "_sheet_id", side_effect=[1, 3]),
+            patch.object(store, "_request") as request,
+        ):
+            learners, employment, accounts = store.delete_selected_records_and_accounts(
+                True,
+                False,
+                [42],
+            )
+
+        self.assertEqual([record["name"] for record in learners], ["Learner"])
+        self.assertEqual(employment, [])
+        self.assertEqual([account["id"] for account in accounts], [42])
+        request.assert_called_once()
+        self.assertEqual(len(request.call_args.kwargs["body"]["requests"]), 2)
+
+    def test_rejects_missing_selected_account_without_deleting_rows(self):
+        store = self.make_store()
+        account_headers = [label for _, label in USER_ACCOUNT_SHEET.fields]
+        account_rows = [
+            account_headers,
+            ["41", "Admin", "admin@example.com", "hash", "admin", "", "1", "2026-01-01"],
+        ]
+        with (
+            patch.object(store, "_get_values", return_value=account_rows),
+            patch.object(store, "_request") as request,
+            self.assertRaisesRegex(
+                SpreadsheetStoreError, "selected accounts were not found"
+            ),
+        ):
+            store.delete_selected_records_and_accounts(False, False, [99])
+
+        request.assert_not_called()
+
     def test_definitions_include_expected_tabs(self):
         self.assertEqual(LEARNER_SHEET.title, "Learners")
         self.assertEqual(EMPLOYMENT_SHEET.title, "Employment")
