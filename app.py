@@ -958,29 +958,58 @@ def migrate_database_users_to_sheets():
 
 
 def get_user_count():
+          return len(get_user_profiles())
+
+
+USER_PROFILE_FIELDS = (
+          "id",
+          "name",
+          "email",
+          "role",
+          "centre",
+          "approved",
+          "created_at",
+)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_user_profiles():
           store = get_user_accounts_store()
           if store is not None:
-                    return len(store.read_user_accounts())
+                    return [
+                              {
+                                        field: account.get(field)
+                                        for field in USER_PROFILE_FIELDS
+                              }
+                              for account in store.read_user_accounts()
+                    ]
           with get_connection() as conn:
-                    return conn.execute(
-                              "SELECT COUNT(*) AS total FROM users"
-                    ).fetchone()["total"]
+                    rows = conn.execute(
+                              "SELECT id,name,email,role,centre,approved,created_at FROM users"
+                    ).fetchall()
+                    return [
+                              {field: row[field] for field in USER_PROFILE_FIELDS}
+                              for row in rows
+                    ]
+
+
+def clear_user_profile_cache():
+          get_user_profiles.clear()
+
+
+def get_user_profile_by_id(user_id):
+          return next(
+                    (
+                              account
+                              for account in get_user_profiles()
+                              if int(account["id"]) == int(user_id)
+                    ),
+                    None,
+          )
 
 
 def list_user_accounts():
-          store = get_user_accounts_store()
-          columns = ["id", "name", "email", "role", "centre", "approved", "created_at"]
-          if store is not None:
-                    accounts = store.read_user_accounts()
-                    return pd.DataFrame(
-                              [{key: account.get(key) for key in columns} for account in accounts],
-                              columns=columns,
-                    )
-          with get_connection() as conn:
-                    return read_sql_frame(
-                              conn,
-                              "SELECT id,name,email,role,centre,approved,created_at FROM users",
-                    )
+          return pd.DataFrame(get_user_profiles(), columns=USER_PROFILE_FIELDS)
 
 
 class DuplicateAccountError(RuntimeError):
@@ -1082,6 +1111,7 @@ def register_user(name, email, password, centre):
                                                   "created_at": datetime.now().isoformat(timespec="seconds"),
                                         }
                               )
+                              clear_user_profile_cache()
                               return role
                     if conn.execute(
                               "SELECT 1 FROM users WHERE email=?",
@@ -1106,13 +1136,17 @@ def register_user(name, email, password, centre):
                                         datetime.now().isoformat(timespec="seconds"),
                               ),
                     )
+                    clear_user_profile_cache()
                     return role
 
 
 def update_user_account(user_id, changes):
           store = get_user_accounts_store()
           if store is not None:
-                    return store.update_user_account(int(user_id), changes)
+                    updated = store.update_user_account(int(user_id), changes)
+                    if updated:
+                              clear_user_profile_cache()
+                    return updated
           database_changes = dict(changes)
           if "password_hash" in database_changes:
                     database_changes["password"] = database_changes.pop("password_hash")
@@ -1122,16 +1156,25 @@ def update_user_account(user_id, changes):
                               f"UPDATE users SET {assignments} WHERE id=?",
                               (*database_changes.values(), user_id),
                     )
-                    return result.rowcount > 0
+                    updated = result.rowcount > 0
+          if updated:
+                    clear_user_profile_cache()
+          return updated
 
 
 def delete_user_account(user_id):
           store = get_user_accounts_store()
           if store is not None:
-                    return store.delete_user_account(int(user_id))
+                    deleted = store.delete_user_account(int(user_id))
+                    if deleted:
+                              clear_user_profile_cache()
+                    return deleted
           with get_connection() as conn:
                     result = conn.execute("DELETE FROM users WHERE id=?", (user_id,))
-                    return result.rowcount > 0
+                    deleted = result.rowcount > 0
+          if deleted:
+                    clear_user_profile_cache()
+          return deleted
 
 
 REMEMBER_COOKIE = "meal_dashboard_auth"
@@ -2985,7 +3028,7 @@ if st.session_state.user is None:
 user = st.session_state.user
 if user is not None:
           try:
-                    current_account = get_user_by_id(int(user["id"]))
+                    current_account = get_user_profile_by_id(int(user["id"]))
           except DATA_ERRORS as error:
                     st.error(f"Could not verify the signed-in account: {error}")
                     st.stop()
@@ -5347,6 +5390,7 @@ elif page == "Delete All Data" and is_admin:
                                                   )
                                                   st.stop()
 
+                              clear_user_profile_cache()
                               deleted_labels = []
                               if selected_account_ids:
                                         selected_names = [

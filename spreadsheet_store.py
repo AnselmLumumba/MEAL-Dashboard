@@ -249,9 +249,18 @@ class GoogleSheetsStore:
             return response.json() if response.content else {}
         except requests.HTTPError as error:
             status = error.response.status_code if error.response is not None else "unknown"
+            if status == 429:
+                message = (
+                    "Google Sheets API rate limit exceeded (HTTP 429). "
+                    "Wait briefly and try again; repeated refreshes can extend the limit."
+                )
+            else:
+                message = (
+                    f"Google Sheets API rejected the request (HTTP {status}). "
+                    "Check the spreadsheet ID, service-account access, and enabled API."
+                )
             raise SpreadsheetStoreError(
-                f"Google Sheets API rejected the request (HTTP {status}). "
-                "Check the spreadsheet ID, service-account access, and enabled API."
+                message
             ) from error
         except requests.RequestException as error:
             raise SpreadsheetStoreError(

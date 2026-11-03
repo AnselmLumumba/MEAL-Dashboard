@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import patch
 
+import requests
+
 from spreadsheet_store import (
     EMPLOYMENT_SHEET,
     LEARNER_SHEET,
@@ -16,6 +18,23 @@ class GoogleSheetsStoreTests(unittest.TestCase):
         store.spreadsheet_id = "test-spreadsheet"
         store._initialized = True
         return store
+
+    def test_reports_google_sheets_rate_limit_clearly(self):
+        store = self.make_store()
+        response = requests.Response()
+        response.status_code = 429
+        response.url = "https://sheets.googleapis.com/test"
+        request = requests.Request("GET", response.url).prepare()
+        response.request = request
+        with (
+            patch.object(store, "_session") as session,
+            self.assertRaisesRegex(
+                SpreadsheetStoreError,
+                "rate limit exceeded \\(HTTP 429\\)",
+            ),
+        ):
+            session.return_value.request.return_value = response
+            store._request("GET")
 
     def test_normalizes_human_readable_headers(self):
         headers = [
