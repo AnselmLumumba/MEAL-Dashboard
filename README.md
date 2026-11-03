@@ -74,4 +74,18 @@ The app uses the `Learners` and `Employment` tabs for learner and graduate-trace
 
 **Security:** The `User Accounts` tab contains names, email addresses, roles, approval status, and PBKDF2 password hashes. Passwords are never stored as plain text, but spreadsheet editors can see the hashes and can change roles or approvals. Restrict sharing to trusted administrators and the app’s service account; anyone with sheet access may view or alter all its data. Remember-me session tokens remain in the configured database.
 
+### Account approval emails
+
+The app sends an approval confirmation to the address used during sign-up after an administrator approves the account. The first administrator account is approved immediately and receives the same confirmation. If email delivery fails, the account approval remains successful and the app displays a warning.
+
+For Gmail delivery, enable 2-Step Verification on the sender account, create a Google App Password, and add these values under Streamlit Community Cloud **App settings → Secrets**. Use the app password, not the normal Gmail password:
+
+```toml
+[email]
+gmail_address = "mwakazi166@gmail.com"
+gmail_app_password = "<gmail-app-password>"
+```
+
+Keep the app password private. Do not commit it to GitHub or paste it into chat. Local development may use the same `[email]` section in the ignored `.streamlit/secrets.toml`.
+
 For local development, add the same `[google_sheets]` and `[gcp_service_account]` sections to the ignored `.streamlit/secrets.toml`. Do not put credentials in the repository. When credentials are absent, accounts and learner/employment records remain in the configured database. Use test records first and confirm the spreadsheet is shared with the service account before entering personal data.

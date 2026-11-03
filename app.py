@@ -38,6 +38,7 @@ from spreadsheet_store import (
           GoogleSheetsStore,
           SpreadsheetStoreError,
 )
+from email_notifications import EmailNotificationError, send_account_approved_email
 
 
 # =========================================================
@@ -2781,7 +2782,25 @@ if st.session_state.user is None:
                                                             signup_password,
                                                             signup_centre,
                                                   )
-                                                  st.success("Administrator account created. Please log in." if role == "admin" else "Account created. Await administrator approval.")
+                                                  if role == "admin":
+                                                            email_settings = st.secrets.get("email", {})
+                                                            try:
+                                                                      send_account_approved_email(
+                                                                                email_settings.get("gmail_address", ""),
+                                                                                email_settings.get("gmail_app_password", ""),
+                                                                                signup_email.strip().lower(),
+                                                                                full_name.strip(),
+                                                                      )
+                                                            except EmailNotificationError as error:
+                                                                      st.warning(
+                                                                                f"Administrator account created and approved, but the confirmation email was not sent: {error}"
+                                                                      )
+                                                            else:
+                                                                      st.success(
+                                                                                f"Administrator account created and approved. Confirmation email sent to {signup_email.strip().lower()}."
+                                                                      )
+                                                  else:
+                                                            st.success("Account created. Await administrator approval.")
 
                                         except DuplicateAccountError:
                                                   st.error("This email is already registered.")
@@ -4408,6 +4427,10 @@ elif page == "Generate Excel Report":
 elif page == "User Approvals" and is_admin:
 
           st.subheader("Centre Account Approvals")
+          approval_notice = st.session_state.pop("account_approval_notice", None)
+          if approval_notice:
+                    notice_type, notice_message = approval_notice
+                    getattr(st, notice_type)(notice_message)
 
           try:
                     users_df = list_user_accounts().sort_values(
@@ -4461,7 +4484,28 @@ elif page == "User Approvals" and is_admin:
                                                                                 if not updated:
                                                                                           st.error("Account was not found.")
                                                                                 else:
-                                                                                          st.success("Account approved.")
+                                                                                          email_settings = st.secrets.get("email", {})
+                                                                                          sender_email = email_settings.get(
+                                                                                                    "gmail_address", "",
+                                                                                          )
+                                                                                          app_password = email_settings.get("gmail_app_password", "")
+                                                                                          try:
+                                                                                                    send_account_approved_email(
+                                                                                                              sender_email,
+                                                                                                              app_password,
+                                                                                                              str(row["email"]),
+                                                                                                              str(row["name"]),
+                                                                                                    )
+                                                                                          except EmailNotificationError as error:
+                                                                                                   st.session_state["account_approval_notice"] = (
+                                                                                                             "warning",
+                                                                                                             f"Account approved, but the confirmation email was not sent: {error}",
+                                                                                                   )
+                                                                                          else:
+                                                                                                   st.session_state["account_approval_notice"] = (
+                                                                                                             "success",
+                                                                                                             f"Account approved and confirmation email sent to {row['email']}.",
+                                                                                                   )
                                                                                           st.rerun()
                                                                       except SpreadsheetStoreError as error:
                                                                                 st.error(f"Could not approve account: {error}")
