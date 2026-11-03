@@ -162,6 +162,40 @@ class GoogleSheetsStoreTests(unittest.TestCase):
             [[label for _, label in USER_ACCOUNT_SHEET.fields]],
         )
 
+    def test_appends_missing_user_account_headers_without_replacing_existing_headers(self):
+        store = self.make_store()
+        existing_headers = ["Name", "Email", "Role"]
+        missing_labels = [
+            label
+            for field, label in USER_ACCOUNT_SHEET.fields
+            if field not in {"name", "email", "role"}
+        ]
+        with (
+            patch.object(
+                store,
+                "_request",
+                return_value={"sheets": [{"properties": {"title": "User Accounts"}}]},
+            ),
+            patch.object(store, "_get_values", return_value=[existing_headers]),
+            patch.object(store, "_write_values") as write_values,
+        ):
+            store.initialize_user_accounts()
+
+        write_values.assert_called_once_with(
+            "User Accounts",
+            "D1:H1",
+            [missing_labels],
+        )
+
+    def test_account_read_reports_missing_required_headers_explicitly(self):
+        store = self.make_store()
+        with patch.object(store, "_get_values", return_value=[["Name", "Email"]]):
+            with self.assertRaisesRegex(
+                SpreadsheetStoreError,
+                "missing required columns",
+            ):
+                store.read_user_accounts()
+
     def test_reads_hashed_user_accounts_with_normalized_email(self):
         store = self.make_store()
         headers = [label for _, label in USER_ACCOUNT_SHEET.fields]

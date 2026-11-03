@@ -396,12 +396,30 @@ class GoogleSheetsStore:
                 for field, label in USER_ACCOUNT_SHEET.fields
                 if field in missing_fields
             ]
+            if len(appended) != len(missing_fields):
+                raise SpreadsheetStoreError(
+                    "The User Accounts tab schema contains an unsupported field."
+                )
             start = len(headers)
-            end = _column_name(start + len(appended) - 1)
-            self._write_values(
-                USER_ACCOUNT_SHEET.title,
-                f"{_column_name(start)}1:{end}1",
-                [appended],
+            try:
+                end = _column_name(start + len(appended) - 1)
+                start_column = _column_name(start)
+                self._write_values(
+                    USER_ACCOUNT_SHEET.title,
+                    f"{start_column}1:{end}1",
+                    [appended],
+                )
+            except (IndexError, ValueError) as error:
+                raise SpreadsheetStoreError(
+                    "Could not add the required columns to the User Accounts tab."
+                ) from error
+            headers.extend(appended)
+            normalized = self._normalize_headers(USER_ACCOUNT_SHEET, headers)
+        remaining_fields = set(USER_ACCOUNT_SHEET.field_names) - set(normalized.values())
+        if remaining_fields:
+            raise SpreadsheetStoreError(
+                "The User Accounts tab is missing required columns: "
+                + ", ".join(sorted(remaining_fields))
             )
         self._user_accounts_initialized = True
 
@@ -411,6 +429,12 @@ class GoogleSheetsStore:
             return []
         headers = [str(value).strip() for value in values[0]]
         field_by_header = self._normalize_headers(USER_ACCOUNT_SHEET, headers)
+        missing_fields = set(USER_ACCOUNT_SHEET.field_names) - set(field_by_header.values())
+        if missing_fields:
+            raise SpreadsheetStoreError(
+                "The User Accounts tab is missing required columns: "
+                + ", ".join(sorted(missing_fields))
+            )
         accounts = []
         seen_ids = set()
         seen_emails = set()
