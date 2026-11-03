@@ -1,6 +1,6 @@
 # MEAL-Dashboard
 
-Don Bosco Kakuma MEAL learner and employment monitoring app, built with Streamlit.
+UN Kakuma MEAL learner and employment monitoring app, built with Streamlit.
 
 ## Local run
 

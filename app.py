@@ -59,7 +59,7 @@ from notification_events import audit_notification
 
 # =========================================================
 
-st.set_page_config(page_title="Don Bosco Kakuma MEAL Dashboard", page_icon="📊", layout="wide")
+st.set_page_config(page_title="UN Kakuma MEAL Dashboard", page_icon="📊", layout="wide")
 
 APP_DIR = Path(__file__).parent
 
@@ -1492,7 +1492,7 @@ def show_branding():
 
           with right:
 
-                    st.markdown(f"""<div class="dbk-header"><div class="dbk-tagline">MONITORING, EVALUATION, ACCOUNTABILITY AND LEARNING</div><h1>Don Bosco Kakuma</h1><p>MEAL Monitoring Dashboard | {datetime.now():%d %B %Y}</p></div>""", unsafe_allow_html=True)
+                    st.markdown(f"""<div class="dbk-header"><div class="dbk-tagline">MONITORING, EVALUATION, ACCOUNTABILITY AND LEARNING</div><h1>UN Kakuma</h1><p>MEAL Monitoring Dashboard | {datetime.now():%d %B %Y}</p></div>""", unsafe_allow_html=True)
 
 
 
@@ -2646,7 +2646,7 @@ def generate_statistical_report(frame, employment_frame, template_bytes=None):
 
                     ["Report generated", datetime.now().strftime("%d %B %Y %H:%M")],
 
-                    ["Data source", "Don Bosco Kakuma MEAL database"],
+                    ["Data source", "UN Kakuma MEAL database"],
 
                     ["Student records included", len(frame)],
 
@@ -2791,7 +2791,7 @@ if st.session_state.user is None:
                               <div class="welcome-hero">
                                 <div>
                                   <div class="welcome-kicker"><span class="welcome-status"></span> Monitoring workspace · {datetime.now():%d %B %Y}</div>
-                                  <div class="welcome-title">Don Bosco Kakuma<br>MEAL Insights</div>
+                                  <div class="welcome-title">UN Kakuma<br>MEAL Insights</div>
                                   <div class="welcome-copy">A central view of learner registration, education progress and employment outcomes — built to support clear, evidence-led decisions.</div>
                                 </div>
                                 <div class="welcome-chart" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span></div>
@@ -3015,7 +3015,7 @@ if not is_admin and user_centre not in CENTRES:
 st.sidebar.markdown(
           """
           <div class="meal-brand">
-            <div class="meal-brand-kicker">Don Bosco Kakuma</div>
+            <div class="meal-brand-kicker">UN Kakuma</div>
             <div class="meal-brand-title">MEAL INSIGHTS</div>
             <div class="meal-brand-subtitle">Monitoring workspace</div>
           </div>
@@ -5396,6 +5396,6 @@ elif page == "Delete All Data" and is_admin:
 # =========================================================
 
 st.sidebar.markdown(
-          '<div class="meal-nav-footer">Don Bosco Kakuma<br>Monitoring · Evaluation · Accountability · Learning</div>',
+          '<div class="meal-nav-footer">UN Kakuma<br>Monitoring · Evaluation · Accountability · Learning</div>',
           unsafe_allow_html=True,
 )
