@@ -89,6 +89,20 @@ EMPLOYMENT_SHEET = SheetDefinition(
     ),
 )
 
+USER_ACCOUNT_SHEET = SheetDefinition(
+    "User Accounts",
+    (
+        ("id", "Account ID"),
+        ("name", "Name"),
+        ("email", "Email"),
+        ("password_hash", "Password Hash (Sensitive)"),
+        ("role", "Role"),
+        ("centre", "Centre"),
+        ("approved", "Approved"),
+        ("created_at", "Created At"),
+    ),
+)
+
 _DEFINITIONS = {
     "learners": LEARNER_SHEET,
     "employment": EMPLOYMENT_SHEET,
@@ -118,6 +132,12 @@ _HEADER_ALIASES = {
         "job title": "job_title",
         "phone": "phone",
         "notes": "notes",
+    },
+    "user accounts": {
+        "account id": "id",
+        "password": "password_hash",
+        "password hash": "password_hash",
+        "password hash (sensitive)": "password_hash",
     },
 }
 
@@ -150,6 +170,7 @@ class GoogleSheetsStore:
             raise SpreadsheetStoreError("Google service-account configuration is missing.")
         self.spreadsheet_id = spreadsheet_id.strip()
         self._initialized = False
+        self._user_accounts_initialized = False
         try:
             self.credentials = Credentials.from_service_account_info(
                 service_account_info,
@@ -287,6 +308,264 @@ class GoogleSheetsStore:
                     body={"data": updates},
                 )
         self._initialized = True
+
+    def initialize_user_accounts(self) -> None:
+        if getattr(self, "_user_accounts_initialized", False):
+            return
+        metadata = self._request(
+            "GET",
+            params={"fields": "sheets(properties(title))"},
+        )
+        titles = {
+            str(sheet.get("properties", {}).get("title", ""))
+            for sheet in metadata.get("sheets", [])
+        }
+        if USER_ACCOUNT_SHEET.title not in titles:
+            try:
+                self._request(
+                    "POST",
+                    ":batchUpdate",
+                    body={
+                        "requests": [
+                            {
+                                "addSheet": {
+                                    "properties": {"title": USER_ACCOUNT_SHEET.title}
+                                }
+                            }
+                        ]
+                    },
+                )
+            except SpreadsheetStoreError:
+                refreshed = self._request(
+                    "GET",
+                    params={"fields": "sheets(properties(title))"},
+                )
+                refreshed_titles = {
+                    str(sheet.get("properties", {}).get("title", ""))
+                    for sheet in refreshed.get("sheets", [])
+                }
+                if USER_ACCOUNT_SHEET.title not in refreshed_titles:
+                    raise
+
+        values = self._get_values(USER_ACCOUNT_SHEET.title)
+        headers = [str(value).strip() for value in (values[0] if values else [])]
+        if not headers:
+            headers = [label for _, label in USER_ACCOUNT_SHEET.fields]
+            self._write_values(USER_ACCOUNT_SHEET.title, "A1", [headers])
+        normalized = self._normalize_headers(USER_ACCOUNT_SHEET, headers)
+        missing_fields = set(USER_ACCOUNT_SHEET.field_names) - set(normalized.values())
+        if missing_fields:
+            appended = [
+                label
+                for field, label in USER_ACCOUNT_SHEET.fields
+                if field in missing_fields
+            ]
+            start = len(headers)
+            end = _column_name(start + len(appended) - 1)
+            self._write_values(
+                USER_ACCOUNT_SHEET.title,
+                f"{_column_name(start)}1:{end}1",
+                [appended],
+            )
+        self._user_accounts_initialized = True
+
+    def read_user_accounts(self) -> list[dict[str, Any]]:
+        values = self._get_values(USER_ACCOUNT_SHEET.title)
+        if not values:
+            return []
+        headers = [str(value).strip() for value in values[0]]
+        field_by_header = self._normalize_headers(USER_ACCOUNT_SHEET, headers)
+        accounts = []
+        seen_ids = set()
+        seen_emails = set()
+        for row in values[1:]:
+            if not any(str(cell).strip() for cell in row):
+                continue
+            padded = row + [""] * (len(headers) - len(row))
+            account = self._record_from_row(
+                USER_ACCOUNT_SHEET,
+                headers,
+                padded,
+                field_by_header,
+            )
+            try:
+                account["id"] = int(account["id"])
+                approved_value = str(account["approved"]).strip().lower()
+                if approved_value not in {"0", "1", "false", "true"}:
+                    raise ValueError
+                account["approved"] = int(approved_value in {"1", "true"})
+            except (KeyError, TypeError, ValueError) as error:
+                raise SpreadsheetStoreError(
+                    "The User Accounts tab contains an invalid account ID or approval value."
+                ) from error
+            account["email"] = str(account.get("email") or "").strip().lower()
+            account["name"] = str(account.get("name") or "").strip()
+            account["role"] = str(account.get("role") or "").strip()
+            account["password"] = str(account.get("password_hash") or "")
+            account.pop("password_hash", None)
+            if not all(
+                (
+                    account["email"],
+                    account["name"],
+                    account["role"],
+                    account["password"],
+                )
+            ):
+                raise SpreadsheetStoreError(
+                    "The User Accounts tab contains an incomplete account record."
+                )
+            if account["id"] in seen_ids or account["email"] in seen_emails:
+                raise SpreadsheetStoreError(
+                    "The User Accounts tab contains duplicate account IDs or email addresses."
+                )
+            seen_ids.add(account["id"])
+            seen_emails.add(account["email"])
+            accounts.append(account)
+        return accounts
+
+    def create_user_account(self, account: dict[str, Any]) -> dict[str, Any]:
+        existing = self.read_user_accounts()
+        email = str(account.get("email", "")).strip().lower()
+        account_id = int(account["id"])
+        if any(user["email"] == email for user in existing):
+            raise SpreadsheetStoreError("This email is already registered.")
+        if any(user["id"] == account_id for user in existing):
+            raise SpreadsheetStoreError("The account ID is already in use.")
+        saved = {
+            "id": account_id,
+            "name": str(account["name"]).strip(),
+            "email": email,
+            "password_hash": str(account["password_hash"]),
+            "role": str(account["role"]),
+            "centre": account.get("centre"),
+            "approved": int(bool(account["approved"])),
+            "created_at": account.get("created_at") or datetime.now().isoformat(timespec="seconds"),
+        }
+        self._append_user_account_row(saved)
+        return {
+            **saved,
+            "password": saved["password_hash"],
+        }
+
+    def update_user_account(self, account_id: int, changes: dict[str, Any]) -> bool:
+        allowed = {"name", "email", "password_hash", "role", "centre", "approved"}
+        if not changes or not set(changes) <= allowed:
+            raise SpreadsheetStoreError("Unsupported User Accounts field update.")
+        values = self._get_values(USER_ACCOUNT_SHEET.title)
+        if not values:
+            return False
+        headers = [str(value).strip() for value in values[0]]
+        field_by_header = self._normalize_headers(USER_ACCOUNT_SHEET, headers)
+        for row_number, row in enumerate(values[1:], start=2):
+            padded = row + [""] * (len(headers) - len(row))
+            id_index = next(
+                (
+                    index
+                    for index, header in enumerate(headers)
+                    if field_by_header.get(header) == "id"
+                ),
+                None,
+            )
+            if id_index is None:
+                raise SpreadsheetStoreError(
+                    "The User Accounts tab is missing its Account ID column."
+                )
+            if str(padded[id_index]).strip() != str(account_id):
+                continue
+            normalized_changes = dict(changes)
+            if "email" in normalized_changes:
+                normalized_changes["email"] = str(normalized_changes["email"]).strip().lower()
+                if any(
+                    user["id"] != account_id
+                    and user["email"] == normalized_changes["email"]
+                    for user in self.read_user_accounts()
+                ):
+                    raise SpreadsheetStoreError("This email is already registered.")
+            reverse_headers = {
+                field: header for header, field in field_by_header.items()
+            }
+            for field, value in normalized_changes.items():
+                header = reverse_headers.get(field)
+                if header is None:
+                    raise SpreadsheetStoreError(
+                        f"The User Accounts tab is missing the {field} column."
+                    )
+                padded[headers.index(header)] = self._format_value(value)
+            end = _column_name(len(headers) - 1)
+            self._write_values(
+                USER_ACCOUNT_SHEET.title,
+                f"A{row_number}:{end}{row_number}",
+                [padded],
+            )
+            return True
+        return False
+
+    def delete_user_account(self, account_id: int) -> bool:
+        values = self._get_values(USER_ACCOUNT_SHEET.title)
+        if not values:
+            return False
+        headers = [str(value).strip() for value in values[0]]
+        field_by_header = self._normalize_headers(USER_ACCOUNT_SHEET, headers)
+        id_index = next(
+            (
+                index
+                for index, header in enumerate(headers)
+                if field_by_header.get(header) == "id"
+            ),
+            None,
+        )
+        if id_index is None:
+            raise SpreadsheetStoreError(
+                "The User Accounts tab is missing its Account ID column."
+            )
+        for row_number, row in enumerate(values[1:], start=2):
+            padded = row + [""] * (len(headers) - len(row))
+            if str(padded[id_index]).strip() != str(account_id):
+                continue
+            sheet_id = self._sheet_id(USER_ACCOUNT_SHEET.title)
+            self._request(
+                "POST",
+                ":batchUpdate",
+                body={
+                    "requests": [
+                        {
+                            "deleteDimension": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "dimension": "ROWS",
+                                    "startIndex": row_number - 1,
+                                    "endIndex": row_number,
+                                }
+                            }
+                        }
+                    ]
+                },
+            )
+            return True
+        return False
+
+    def _append_user_account_row(self, account: dict[str, Any]) -> None:
+        values = self._get_values(USER_ACCOUNT_SHEET.title)
+        headers = [str(value).strip() for value in values[0]] if values else []
+        field_by_header = self._normalize_headers(USER_ACCOUNT_SHEET, headers)
+        if not headers or "id" not in field_by_header.values():
+            raise SpreadsheetStoreError(
+                "The User Accounts tab is not initialized. Reload the app to initialize it."
+            )
+        row = []
+        for header in headers:
+            field = field_by_header.get(header)
+            row.append(self._format_value(account.get(field)) if field else "")
+        self._request(
+            "POST",
+            f"/values/{self._range(USER_ACCOUNT_SHEET.title, 'A1')}:append",
+            params={
+                "valueInputOption": "RAW",
+                "insertDataOption": "INSERT_ROWS",
+                "includeValuesInResponse": "false",
+            },
+            body={"values": [row]},
+        )
 
     def read_records(self, table: str) -> list[dict[str, Any]]:
         definition = self._definition(table)

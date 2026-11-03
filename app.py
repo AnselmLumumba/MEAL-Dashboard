@@ -602,6 +602,9 @@ def init_db():
                                         token_hash TEXT PRIMARY KEY,
                                         user_id BIGINT NOT NULL,
                                         expires_at TEXT)""")
+                              conn.execute("""CREATE TABLE IF NOT EXISTS auth_migrations(
+                                        migration_key TEXT PRIMARY KEY,
+                                        completed_at TEXT NOT NULL)""")
                               conn.execute("""CREATE TABLE IF NOT EXISTS admission_sequences(
                                         centre_code TEXT NOT NULL,
                                         course_code TEXT NOT NULL,
@@ -624,6 +627,10 @@ def init_db():
                               token_hash TEXT PRIMARY KEY,
                               user_id INTEGER NOT NULL,
                               expires_at TEXT)""")
+
+                    conn.execute("""CREATE TABLE IF NOT EXISTS auth_migrations(
+                              migration_key TEXT PRIMARY KEY,
+                              completed_at TEXT NOT NULL)""")
 
                     conn.execute("""CREATE TABLE IF NOT EXISTS admission_sequences(
                               centre_code TEXT NOT NULL,
@@ -766,10 +773,215 @@ def audit_record_values(row):
 
 
 def get_user_by_email(email):
-
+          normalized_email = email.strip().lower()
+          store = get_user_accounts_store()
+          if store is not None:
+                    return next(
+                              (
+                                        account
+                                        for account in store.read_user_accounts()
+                                        if account["email"] == normalized_email
+                              ),
+                              None,
+                    )
           with get_connection() as conn:
+                    return conn.execute(
+                              "SELECT * FROM users WHERE email=?",
+                              (normalized_email,),
+                    ).fetchone()
 
-                    return conn.execute("SELECT * FROM users WHERE email=?", (email.strip().lower(),)).fetchone()
+
+def get_user_by_id(user_id):
+          store = get_user_accounts_store()
+          if store is not None:
+                    return next(
+                              (
+                                        account
+                                        for account in store.read_user_accounts()
+                                        if account["id"] == int(user_id)
+                              ),
+                              None,
+                    )
+          with get_connection() as conn:
+                    return conn.execute(
+                              "SELECT * FROM users WHERE id=?",
+                              (user_id,),
+                    ).fetchone()
+
+
+def get_user_accounts_store():
+          store = get_google_sheets_store()
+          if store is not None:
+                    store.initialize_user_accounts()
+          return store
+
+
+def migrate_database_users_to_sheets():
+          store = get_user_accounts_store()
+          if store is None:
+                    return
+          migration_key = "google_sheets_user_accounts_v1"
+          with get_connection() as conn:
+                    if conn.is_postgres:
+                              conn.execute("LOCK TABLE auth_migrations IN EXCLUSIVE MODE")
+                    else:
+                              conn.execute("BEGIN IMMEDIATE")
+                    completed = conn.execute(
+                              "SELECT 1 FROM auth_migrations WHERE migration_key=?",
+                              (migration_key,),
+                    ).fetchone()
+                    if completed:
+                              return
+                    legacy_accounts = conn.execute(
+                              """SELECT id,name,email,password,role,centre,approved,created_at
+                              FROM users ORDER BY id"""
+                    ).fetchall()
+                    existing = store.read_user_accounts()
+                    existing_emails = {account["email"] for account in existing}
+                    existing_ids = {account["id"] for account in existing}
+                    for row in legacy_accounts:
+                              account = dict(row)
+                              email = str(account["email"]).strip().lower()
+                              if email in existing_emails:
+                                        continue
+                              account_id = int(account["id"])
+                              if account_id in existing_ids:
+                                        raise SpreadsheetStoreError(
+                                                  "Cannot migrate accounts because the User Accounts tab contains a conflicting account ID."
+                                        )
+                              store.create_user_account(
+                                        {
+                                                  "id": account_id,
+                                                  "name": account["name"],
+                                                  "email": email,
+                                                  "password_hash": account["password"],
+                                                  "role": account["role"],
+                                                  "centre": account["centre"],
+                                                  "approved": account["approved"],
+                                                  "created_at": account["created_at"],
+                                        }
+                              )
+                              existing_emails.add(email)
+                              existing_ids.add(account_id)
+                    conn.execute(
+                              "INSERT INTO auth_migrations(migration_key,completed_at) VALUES(?,?)",
+                              (migration_key, datetime.now().isoformat(timespec="seconds")),
+                    )
+
+
+def get_user_count():
+          store = get_user_accounts_store()
+          if store is not None:
+                    return len(store.read_user_accounts())
+          with get_connection() as conn:
+                    return conn.execute(
+                              "SELECT COUNT(*) AS total FROM users"
+                    ).fetchone()["total"]
+
+
+def list_user_accounts():
+          store = get_user_accounts_store()
+          columns = ["id", "name", "email", "role", "centre", "approved", "created_at"]
+          if store is not None:
+                    accounts = store.read_user_accounts()
+                    return pd.DataFrame(
+                              [{key: account.get(key) for key in columns} for account in accounts],
+                              columns=columns,
+                    )
+          with get_connection() as conn:
+                    return read_sql_frame(
+                              conn,
+                              "SELECT id,name,email,role,centre,approved,created_at FROM users",
+                    )
+
+
+class DuplicateAccountError(RuntimeError):
+          pass
+
+
+def _lock_account_store(conn):
+          if conn.is_postgres:
+                    conn.execute("LOCK TABLE auth_migrations IN EXCLUSIVE MODE")
+          else:
+                    conn.execute("BEGIN IMMEDIATE")
+
+
+def register_user(name, email, password, centre):
+          normalized_email = email.strip().lower()
+          store = get_user_accounts_store()
+          with get_connection() as conn:
+                    _lock_account_store(conn)
+                    if store is not None:
+                              accounts = store.read_user_accounts()
+                              if any(
+                                        account["email"] == normalized_email
+                                        for account in accounts
+                              ):
+                                        raise DuplicateAccountError
+                              role = "admin" if not accounts else "centre_head"
+                              approved = 1 if role == "admin" else 0
+                              store.create_user_account(
+                                        {
+                                                  "id": secrets.randbelow((1 << 62) - 1) + 1,
+                                                  "name": name.strip(),
+                                                  "email": normalized_email,
+                                                  "password_hash": hash_password(password),
+                                                  "role": role,
+                                                  "centre": centre,
+                                                  "approved": approved,
+                                                  "created_at": datetime.now().isoformat(timespec="seconds"),
+                                        }
+                              )
+                              return role
+                    if conn.execute(
+                              "SELECT 1 FROM users WHERE email=?",
+                              (normalized_email,),
+                    ).fetchone():
+                              raise DuplicateAccountError
+                    user_count = conn.execute(
+                              "SELECT COUNT(*) AS total FROM users"
+                    ).fetchone()["total"]
+                    role = "admin" if user_count == 0 else "centre_head"
+                    approved = 1 if role == "admin" else 0
+                    conn.execute(
+                              """INSERT INTO users(name,email,password,role,centre,approved,created_at)
+                              VALUES(?,?,?,?,?,?,?)""",
+                              (
+                                        name.strip(),
+                                        normalized_email,
+                                        hash_password(password),
+                                        role,
+                                        centre,
+                                        approved,
+                                        datetime.now().isoformat(timespec="seconds"),
+                              ),
+                    )
+                    return role
+
+
+def update_user_account(user_id, changes):
+          store = get_user_accounts_store()
+          if store is not None:
+                    return store.update_user_account(int(user_id), changes)
+          database_changes = dict(changes)
+          if "password_hash" in database_changes:
+                    database_changes["password"] = database_changes.pop("password_hash")
+          with get_connection() as conn:
+                    assignments = ", ".join(f"{column}=?" for column in database_changes)
+                    result = conn.execute(
+                              f"UPDATE users SET {assignments} WHERE id=?",
+                              (*database_changes.values(), user_id),
+                    )
+                    return result.rowcount > 0
+
+
+def delete_user_account(user_id):
+          store = get_user_accounts_store()
+          if store is not None:
+                    return store.delete_user_account(int(user_id))
+          with get_connection() as conn:
+                    result = conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+                    return result.rowcount > 0
 
 
 REMEMBER_COOKIE = "meal_dashboard_auth"
@@ -800,17 +1012,20 @@ def get_remembered_user(token):
           token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
           now = datetime.now(timezone.utc).isoformat(timespec="seconds")
           with get_connection() as conn:
-                    account = conn.execute(
-                              """SELECT users.* FROM auth_sessions
-                              JOIN users ON users.id=auth_sessions.user_id
-                              WHERE auth_sessions.token_hash=?
-                              AND (auth_sessions.expires_at IS NULL OR auth_sessions.expires_at > ?)
-                              AND users.approved=1""",
+                    session = conn.execute(
+                              """SELECT user_id FROM auth_sessions
+                              WHERE token_hash=?
+                              AND (expires_at IS NULL OR expires_at > ?)""",
                               (token_hash, now),
                     ).fetchone()
-                    if not account:
+                    if not session:
                               conn.execute("DELETE FROM auth_sessions WHERE token_hash=?", (token_hash,))
-                    return account
+                              return None
+          account = get_user_by_id(session["user_id"])
+          if not account or not int(account["approved"]):
+                    revoke_remember_session(token)
+                    return None
+          return account
 
 
 def revoke_remember_session(token):
@@ -2356,6 +2571,13 @@ def generate_statistical_report(frame, employment_frame, template_bytes=None):
 
 # =========================================================
 
+if google_sheets_is_configured():
+          try:
+                    migrate_database_users_to_sheets()
+          except (SpreadsheetStoreError, *DB_ERRORS) as error:
+                    st.error(f"Could not initialize Google Sheets account storage: {error}")
+                    st.stop()
+
 auth_cookie = CookieController(key="meal_auth_cookie_controller")
 
 if "user" not in st.session_state:
@@ -2393,13 +2615,15 @@ if st.session_state.user is None:
 
           if not google_sheets_is_configured():
                     st.warning(
-                              "Google Sheets is not connected yet. Learner and employment records "
-                              "are still using the configured database."
+                              "Google Sheets is not connected yet. Accounts and learner/employment "
+                              "records are still using the configured database."
                     )
 
-          with get_connection() as conn:
-
-                    user_count = conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
+          try:
+                    user_count = get_user_count()
+          except SpreadsheetStoreError as error:
+                    st.error(f"Could not load accounts from Google Sheets: {error}")
+                    st.stop()
 
           brand_column, hero_column = st.columns([0.85, 5], vertical_alignment="center")
           with brand_column:
@@ -2456,12 +2680,16 @@ if st.session_state.user is None:
                               if account and authenticated:
 
                                         if upgrade_legacy_hash:
-                                                  with get_connection() as conn:
-                                                            conn.execute(
-                                                                      "UPDATE users SET password=? WHERE id=?",
-                                                                      (hash_password(password), account["id"]),
+                                                  try:
+                                                            update_user_account(
+                                                                      account["id"],
+                                                                      {"password_hash": hash_password(password)},
                                                             )
-                                                            conn.commit()
+                                                  except SpreadsheetStoreError as error:
+                                                            st.error(
+                                                                      f"Could not update your account password hash: {error}"
+                                                            )
+                                                            st.stop()
 
                                         if not account["approved"]:
 
@@ -2542,23 +2770,19 @@ if st.session_state.user is None:
 
                               else:
 
-                                        role = "admin" if user_count == 0 else "centre_head"
-
-                                        approved = 1 if user_count == 0 else 0
-
                                         try:
-
-                                                  with get_connection() as conn:
-
-                                                            conn.execute("INSERT INTO users(name,email,password,role,centre,approved,created_at) VALUES(?,?,?,?,?,?,?)", (full_name.strip(), signup_email.strip().lower(), hash_password(signup_password), role, signup_centre, approved, datetime.now().isoformat(timespec="seconds")))
-
-                                                            conn.commit()
-
+                                                  role = register_user(
+                                                            full_name,
+                                                            signup_email,
+                                                            signup_password,
+                                                            signup_centre,
+                                                  )
                                                   st.success("Administrator account created. Please log in." if role == "admin" else "Account created. Await administrator approval.")
 
-                                        except DB_INTEGRITY_ERRORS:
-
+                                        except DuplicateAccountError:
                                                   st.error("This email is already registered.")
+                                        except (*DB_ERRORS, SpreadsheetStoreError) as error:
+                                                  st.error(f"Could not create the account: {error}")
 
           st.stop()
 
@@ -4181,12 +4405,15 @@ elif page == "User Approvals" and is_admin:
 
           st.subheader("Centre Account Approvals")
 
-          with get_connection() as conn:
-
-                    users_df = read_sql_frame(
-                              conn,
-                              "SELECT id,name,email,role,centre,approved,created_at FROM users ORDER BY approved ASC,name ASC",
+          try:
+                    users_df = list_user_accounts().sort_values(
+                              ["approved", "name"],
+                              ascending=[True, True],
+                              kind="stable",
                     )
+          except SpreadsheetStoreError as error:
+                    st.error(f"Could not load user accounts: {error}")
+                    st.stop()
 
           if users_df.empty:
 
@@ -4222,29 +4449,32 @@ elif page == "User Approvals" and is_admin:
 
                                                             if st.button("Approve", key=f"approve_{row['id']}"):
 
-                                                                      with get_connection() as conn:
-
-                                                                                conn.execute("UPDATE users SET approved=1 WHERE id=?", (int(row["id"]),))
-
-                                                                                conn.commit()
-
-                                                                      st.success("Account approved.")
-
-                                                                      st.rerun()
+                                                                      try:
+                                                                                updated = update_user_account(
+                                                                                          int(row["id"]),
+                                                                                          {"approved": 1},
+                                                                                )
+                                                                                if not updated:
+                                                                                          st.error("Account was not found.")
+                                                                                else:
+                                                                                          st.success("Account approved.")
+                                                                                          st.rerun()
+                                                                      except SpreadsheetStoreError as error:
+                                                                                st.error(f"Could not approve account: {error}")
 
                                                   with delete_col:
 
                                                             if st.button("Reject / Delete", key=f"delete_{row['id']}"):
 
-                                                                      with get_connection() as conn:
-
-                                                                                conn.execute("DELETE FROM users WHERE id=?", (int(row["id"]),))
-
-                                                                                conn.commit()
-
-                                                                      st.success("Pending account deleted.")
-
-                                                                      st.rerun()
+                                                                      try:
+                                                                                deleted = delete_user_account(int(row["id"]))
+                                                                                if not deleted:
+                                                                                          st.error("Account was not found.")
+                                                                                else:
+                                                                                          st.success("Pending account deleted.")
+                                                                                          st.rerun()
+                                                                      except SpreadsheetStoreError as error:
+                                                                                st.error(f"Could not delete account: {error}")
 
 elif page == "Change History" and is_admin:
 

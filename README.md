@@ -47,14 +47,15 @@ The statistical report generator uses the data-free `END SEPTEMBER 2026 STATISTI
 - Local mode (no `DATABASE_URL`): SQLite in `meal.db`.
 - Hosted mode (`DATABASE_URL` set): PostgreSQL; tables and indexes are initialized at app startup.
 - The two databases are independent. No existing local learner or employment data is migrated automatically.
-- Account records and remembered sign-in sessions are stored in the configured database. Keep `DATABASE_URL` pointed at the same persistent database between deployments.
-- Learner and employment records can use Google Sheets when the `gcp_service_account` secret is configured; authentication, audit logs, and admission-number sequences remain in the configured database.
+- Remembered sign-in sessions, audit logs, and admission-number sequences remain in the configured database. Keep `DATABASE_URL` pointed at the same persistent database between deployments.
+- When Google Sheets is configured, account profiles and PBKDF2-SHA256 password hashes are stored in the `User Accounts` tab. Without Google Sheets credentials, account profiles and hashes remain in the configured database.
+- Learner and employment records can use Google Sheets when the `gcp_service_account` secret is configured.
 - Keep `meal.db`, report workbooks containing personal data, and `.streamlit/secrets.toml` out of Git.
 - New account passwords are stored using PBKDF2-SHA256. Existing legacy password hashes are upgraded after a successful login.
 
-## Google Sheets records
+## Google Sheets records and accounts
 
-The app uses the `Learners` and `Employment` tabs in the MEAL spreadsheet for learner and graduate-tracer records. It continues to use the configured PostgreSQL/SQLite database for user accounts, authentication, audit logs, and admission-number sequences. Existing database records are not copied to the spreadsheet automatically.
+The app uses the `Learners` and `Employment` tabs for learner and graduate-tracer records. When Sheets is configured, it creates a `User Accounts` tab and uses it for sign-ups, logins, account approvals, and password hashes. Remembered sign-in sessions, audit logs, and admission-number sequences remain in the configured database.
 
 1. Enable the Google Sheets API in the Google Cloud project associated with the service account.
 2. Add the service-account JSON fields to Streamlit Community Cloud **App settings → Secrets**. Keep the existing `DATABASE_URL` secret, then add:
@@ -69,6 +70,8 @@ The app uses the `Learners` and `Employment` tabs in the MEAL spreadsheet for le
 
    Include the remaining fields from the service-account JSON file as well. Never commit the credentials or paste them into chat or source code.
 3. Share the spreadsheet with the `client_email` value as an **Editor**. Keep the sheet private and grant access only to authorized staff and the service account.
-4. Deploy/restart the app. On first connection, it verifies the two tab names and appends any missing schema columns, including `Record ID` and `Created At`. Existing columns and learner data are preserved. When service-account credentials are not configured, the app visibly reports that learner and employment records are still using the configured database.
+4. Deploy/restart the app. On first connection, it verifies the `Learners` and `Employment` tabs, appends missing columns without removing existing data, creates `User Accounts`, and copies existing database account rows there once. The original account rows are retained in the database as a rollback backup. New sign-ups, approvals, and password-hash upgrades then use the sheet. Existing learner and employment database records are not migrated automatically.
 
-For local development, add the same `[google_sheets]` and `[gcp_service_account]` sections to the ignored `.streamlit/secrets.toml`. Do not put credentials in the repository. Use test records first and confirm the spreadsheet is shared with the service account before entering personal data.
+**Security:** The `User Accounts` tab contains names, email addresses, roles, approval status, and PBKDF2 password hashes. Passwords are never stored as plain text, but spreadsheet editors can see the hashes and can change roles or approvals. Restrict sharing to trusted administrators and the app’s service account; anyone with sheet access may view or alter all its data. Remember-me session tokens remain in the configured database.
+
+For local development, add the same `[google_sheets]` and `[gcp_service_account]` sections to the ignored `.streamlit/secrets.toml`. Do not put credentials in the repository. When credentials are absent, accounts and learner/employment records remain in the configured database. Use test records first and confirm the spreadsheet is shared with the service account before entering personal data.

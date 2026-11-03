@@ -1,7 +1,12 @@
 import unittest
 from unittest.mock import patch
 
-from spreadsheet_store import EMPLOYMENT_SHEET, LEARNER_SHEET, GoogleSheetsStore
+from spreadsheet_store import (
+    EMPLOYMENT_SHEET,
+    LEARNER_SHEET,
+    USER_ACCOUNT_SHEET,
+    GoogleSheetsStore,
+)
 
 
 class GoogleSheetsStoreTests(unittest.TestCase):
@@ -128,6 +133,110 @@ class GoogleSheetsStoreTests(unittest.TestCase):
     def test_definitions_include_expected_tabs(self):
         self.assertEqual(LEARNER_SHEET.title, "Learners")
         self.assertEqual(EMPLOYMENT_SHEET.title, "Employment")
+
+    def test_initializes_user_accounts_tab_without_overwriting_other_tabs(self):
+        store = self.make_store()
+        with (
+            patch.object(
+                store,
+                "_request",
+                side_effect=[
+                    {"sheets": [{"properties": {"title": "Learners"}}]},
+                    {},
+                ],
+            ) as request,
+            patch.object(store, "_get_values", return_value=[]),
+            patch.object(store, "_write_values") as write_values,
+        ):
+            store.initialize_user_accounts()
+
+        self.assertEqual(request.call_args_list[1].args[1], ":batchUpdate")
+        self.assertEqual(
+            request.call_args_list[1].kwargs["body"]["requests"][0]["addSheet"]["properties"]["title"],
+            "User Accounts",
+        )
+        write_values.assert_called_once_with(
+            "User Accounts",
+            "A1",
+            [[label for _, label in USER_ACCOUNT_SHEET.fields]],
+        )
+
+    def test_reads_hashed_user_accounts_with_normalized_email(self):
+        store = self.make_store()
+        headers = [label for _, label in USER_ACCOUNT_SHEET.fields]
+        row = ["42", "Amina", "AMINA@example.com", "pbkdf2_hash", "centre_head", "DBK", "0", "2026-01-01"]
+        with patch.object(store, "_get_values", return_value=[headers, row]):
+            accounts = store.read_user_accounts()
+
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["id"], 42)
+        self.assertEqual(accounts[0]["email"], "amina@example.com")
+        self.assertEqual(accounts[0]["password"], "pbkdf2_hash")
+        self.assertEqual(accounts[0]["approved"], 0)
+        self.assertNotIn("password_hash", accounts[0])
+
+    def test_creates_user_account_with_raw_hashed_password_field(self):
+        store = self.make_store()
+        headers = [label for _, label in USER_ACCOUNT_SHEET.fields]
+        with (
+            patch.object(store, "_get_values", return_value=[headers]),
+            patch.object(store, "_request") as request,
+        ):
+            saved = store.create_user_account(
+                {
+                    "id": 42,
+                    "name": "Amina",
+                    "email": "AMINA@example.com",
+                    "password_hash": "pbkdf2_hash",
+                    "role": "centre_head",
+                    "centre": "DBK",
+                    "approved": 0,
+                    "created_at": "2026-01-01",
+                }
+            )
+
+        self.assertEqual(saved["email"], "amina@example.com")
+        self.assertEqual(saved["password"], "pbkdf2_hash")
+        self.assertEqual(
+            request.call_args.kwargs["body"]["values"][0],
+            [
+                42,
+                "Amina",
+                "amina@example.com",
+                "pbkdf2_hash",
+                "centre_head",
+                "DBK",
+                0,
+                "2026-01-01",
+            ],
+        )
+
+    def test_updates_and_deletes_user_accounts(self):
+        store = self.make_store()
+        headers = [label for _, label in USER_ACCOUNT_SHEET.fields]
+        row = ["42", "Amina", "amina@example.com", "hash", "centre_head", "DBK", "0", "2026-01-01"]
+        with (
+            patch.object(store, "_get_values", return_value=[headers, row]),
+            patch.object(store, "_write_values") as write_values,
+        ):
+            updated = store.update_user_account(42, {"approved": 1})
+
+        self.assertTrue(updated)
+        self.assertEqual(write_values.call_args.args[1], "A2:H2")
+        self.assertEqual(write_values.call_args.args[2][0][6], 1)
+
+        with (
+            patch.object(store, "_get_values", return_value=[headers, row]),
+            patch.object(store, "_sheet_id", return_value=8),
+            patch.object(store, "_request") as request,
+        ):
+            deleted = store.delete_user_account(42)
+
+        self.assertTrue(deleted)
+        self.assertEqual(
+            request.call_args.kwargs["body"]["requests"][0]["deleteDimension"]["range"],
+            {"sheetId": 8, "dimension": "ROWS", "startIndex": 1, "endIndex": 2},
+        )
 
 
 if __name__ == "__main__":
