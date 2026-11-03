@@ -194,6 +194,25 @@ class GoogleSheetsStoreTests(unittest.TestCase):
 
         self.assertEqual(accounts[0]["id"], 2_575_170_000_000_000_000)
 
+    def test_reads_integral_decimal_approval_values(self):
+        store = self.make_store()
+        headers = [label for _, label in USER_ACCOUNT_SHEET.fields]
+        for approved, expected in (("1.0", 1), ("0.0", 0), (True, 1), ("TRUE", 1)):
+            row = [
+                "42",
+                "Amina",
+                "amina@example.com",
+                "pbkdf2_hash",
+                "admin",
+                "DBK",
+                approved,
+                "2026-01-01",
+            ]
+            with self.subTest(approved=approved):
+                with patch.object(store, "_get_values", return_value=[headers, row]):
+                    accounts = store.read_user_accounts()
+                self.assertEqual(accounts[0]["approved"], expected)
+
     def test_rejects_fractional_and_out_of_range_account_ids(self):
         store = self.make_store()
         headers = [label for _, label in USER_ACCOUNT_SHEET.fields]
@@ -212,9 +231,33 @@ class GoogleSheetsStoreTests(unittest.TestCase):
                 with patch.object(store, "_get_values", return_value=[headers, row]):
                     with self.assertRaisesRegex(
                         SpreadsheetStoreError,
-                        "invalid account ID or approval value",
+                        "invalid account ID in row 2",
                     ):
                         store.read_user_accounts()
+
+    def test_reports_invalid_approval_row_without_exposing_account_data(self):
+        store = self.make_store()
+        headers = [label for _, label in USER_ACCOUNT_SHEET.fields]
+        row = [
+            "42",
+            "Private Name",
+            "private@example.com",
+            "private-hash",
+            "admin",
+            "DBK",
+            "pending",
+            "2026-01-01",
+        ]
+        with patch.object(store, "_get_values", return_value=[headers, row]):
+            with self.assertRaisesRegex(
+                SpreadsheetStoreError,
+                "invalid approval value in row 2",
+            ) as error:
+                store.read_user_accounts()
+
+        self.assertNotIn("Private Name", str(error.exception))
+        self.assertNotIn("private@example.com", str(error.exception))
+        self.assertNotIn("private-hash", str(error.exception))
 
     def test_creates_user_account_with_raw_hashed_password_field(self):
         store = self.make_store()

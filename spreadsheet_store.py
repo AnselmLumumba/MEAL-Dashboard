@@ -36,6 +36,25 @@ def _parse_user_account_id(value: Any) -> int:
         raise ValueError("Invalid user account ID.") from error
 
 
+def _parse_approval_value(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "false"}:
+        return int(normalized == "true")
+    try:
+        numeric_value = Decimal(normalized)
+        if (
+            not numeric_value.is_finite()
+            or numeric_value != numeric_value.to_integral_value()
+            or numeric_value not in {Decimal(0), Decimal(1)}
+        ):
+            raise ValueError
+        return int(numeric_value)
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise ValueError("Invalid account approval value.") from error
+
+
 class SpreadsheetStoreError(RuntimeError):
     """Raised when Google Sheets configuration or access is invalid."""
 
@@ -395,7 +414,7 @@ class GoogleSheetsStore:
         accounts = []
         seen_ids = set()
         seen_emails = set()
-        for row in values[1:]:
+        for row_number, row in enumerate(values[1:], start=2):
             if not any(str(cell).strip() for cell in row):
                 continue
             padded = row + [""] * (len(headers) - len(row))
@@ -407,13 +426,15 @@ class GoogleSheetsStore:
             )
             try:
                 account["id"] = _parse_user_account_id(account["id"])
-                approved_value = str(account["approved"]).strip().lower()
-                if approved_value not in {"0", "1", "false", "true"}:
-                    raise ValueError
-                account["approved"] = int(approved_value in {"1", "true"})
             except (KeyError, TypeError, ValueError) as error:
                 raise SpreadsheetStoreError(
-                    "The User Accounts tab contains an invalid account ID or approval value."
+                    f"The User Accounts tab has an invalid account ID in row {row_number}."
+                ) from error
+            try:
+                account["approved"] = _parse_approval_value(account["approved"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise SpreadsheetStoreError(
+                    f"The User Accounts tab has an invalid approval value in row {row_number}."
                 ) from error
             account["email"] = str(account.get("email") or "").strip().lower()
             account["name"] = str(account.get("name") or "").strip()
