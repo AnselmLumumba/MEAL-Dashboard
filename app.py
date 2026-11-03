@@ -5160,15 +5160,71 @@ elif page == "Delete All Data" and is_admin:
                               store = get_user_accounts_store()
                               if store is not None:
                                         try:
-                                                  (
-                                                            deleted_learner_records,
-                                                            deleted_employment_records,
-                                                            deleted_account_rows,
-                                                  ) = store.delete_selected_records_and_accounts(
-                                                            delete_learners,
-                                                            delete_employment,
-                                                            selected_account_ids,
+                                                  delete_selected = getattr(
+                                                            store,
+                                                            "delete_selected_records_and_accounts",
+                                                            None,
                                                   )
+                                                  if callable(delete_selected):
+                                                            (
+                                                                      deleted_learner_records,
+                                                                      deleted_employment_records,
+                                                                      deleted_account_rows,
+                                                            ) = delete_selected(
+                                                                      delete_learners,
+                                                                      delete_employment,
+                                                                      selected_account_ids,
+                                                            )
+                                                  else:
+                                                            clear_records = getattr(
+                                                                      store,
+                                                                      "clear_records",
+                                                                      None,
+                                                            )
+                                                            delete_account = getattr(
+                                                                      store,
+                                                                      "delete_user_account",
+                                                                      None,
+                                                            )
+                                                            if (
+                                                                      (delete_learners or delete_employment)
+                                                                      and not callable(clear_records)
+                                                            ):
+                                                                      raise SpreadsheetStoreError(
+                                                                                "The configured Google Sheets store "
+                                                                                "does not support clearing records. "
+                                                                                "Reload the latest app version."
+                                                                      )
+                                                            if selected_account_ids and not callable(
+                                                                      delete_account
+                                                            ):
+                                                                      raise SpreadsheetStoreError(
+                                                                                "The configured Google Sheets store "
+                                                                                "does not support deleting accounts. "
+                                                                                "Reload the latest app version."
+                                                                      )
+                                                            deleted_learner_records = (
+                                                                      clear_records("learners")
+                                                                      if delete_learners
+                                                                      else []
+                                                            )
+                                                            deleted_employment_records = (
+                                                                      clear_records("employment")
+                                                                      if delete_employment
+                                                                      else []
+                                                            )
+                                                            deleted_account_rows = []
+                                                            for account_id in selected_account_ids:
+                                                                      if not delete_account(
+                                                                                account_id
+                                                                      ):
+                                                                                raise SpreadsheetStoreError(
+                                                                                          "A selected account was not found. "
+                                                                                          "Refresh and try again."
+                                                                                )
+                                                                      deleted_account_rows.append(
+                                                                                account_id_to_row[account_id]
+                                                                      )
                                         except DATA_ERRORS as error:
                                                   st.error(
                                                             f"Could not delete the selected records from Google Sheets: {error}"
