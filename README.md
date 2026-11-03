@@ -78,15 +78,19 @@ The app uses the `Learners` and `Employment` tabs for learner and graduate-trace
 
 The app sends an approval confirmation to the address used during sign-up after an administrator approves the account. The first administrator account is approved immediately and receives the same confirmation. If email delivery fails, the account approval remains successful and the app displays a warning.
 
-The app sends email using the Resend HTTPS API because this deployment cannot reach Gmail SMTP. Create a Resend account, add and verify a domain you control in Resend, and create an API key. Use a sender address on that verified domain; a personal `@gmail.com` address cannot be used as the sender. Add the values under Streamlit Community Cloud **App settings → Secrets**:
+The app sends email through Gmail SMTP. Turn on 2-Step Verification for the sender's Google account, then create a Google App Password. Add the Gmail address and app password under Streamlit Community Cloud **App settings → Secrets**:
 
 ```toml
 [email]
-resend_api_key = "re_your_api_key"
-resend_from = "notifications@your-verified-domain.org"
+gmail_address = "your-account@gmail.com"
+gmail_app_password = "your 16-character app password"
 ```
 
-Keep the API key private. Do not commit it to GitHub or paste it into chat. Local development may use the same `[email]` section in the ignored `.streamlit/secrets.toml`. Admins can use **User Approvals → Test or resend account email** to test delivery to their own account or resend an approval notice. A successful API response means Resend accepted the message for processing; check inbox and spam folders for delivery.
+Keep the app password private. Do not commit it to GitHub or paste it into chat. Local development may use the same `[email]` section in the ignored `.streamlit/secrets.toml`. Admins can use **User Approvals → Test or resend account email** to test delivery to their own account or resend an approval notice. The hosting environment must allow outbound SMTP over port 587; if it blocks SMTP, Gmail delivery cannot work from that host. Check inbox and spam folders for test messages.
+
+### Admin notifications
+
+Administrators can use **Notifications** in the sidebar to review account sign-ups, approvals and rejections, learner and employment record changes, imports, and bulk deletions. Notifications are stored in the database until an administrator marks them read. Read status is shared across administrator accounts. The sidebar shows the total unread count; the panel provides per-notification and mark-all actions, with older notifications available through pagination.
 
 For local development, add the same `[google_sheets]` and `[gcp_service_account]` sections to the ignored `.streamlit/secrets.toml`. Do not put credentials in the repository. When credentials are absent, accounts and learner/employment records remain in the configured database. Use test records first and confirm the spreadsheet is shared with the service account before entering personal data.
 
