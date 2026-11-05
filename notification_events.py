@@ -52,7 +52,7 @@ def audit_notification(
     elif action == "delete":
         verb = "deleted"
     elif action == "assign_admission_number":
-        verb = "assigned an admission number to"
+        verb = "assigned a manifest number to"
     else:
         return None
 

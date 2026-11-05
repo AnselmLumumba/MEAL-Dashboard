@@ -16,16 +16,19 @@ Create an account once, then use **Login** on later visits. The login form's
 Use it only on a private device; browsers may clear or limit stored cookies.
 Signing out revokes that device's remembered session.
 
-New student admission numbers are generated as `CENTRE/COURSE###/YEAR`
+New student manifest numbers are generated as `CENTRE/COURSE###/YEAR`
 (for example, `DBK/COMP001/2026`). Numbering starts at 001 for each centre,
-course and year. Student-register uploads keep supplied admission numbers and
+course and year. Student-register uploads keep supplied manifest numbers and
 generate numbers for new rows that do not have one. Administrators can generate
 numbers for existing records with missing identifiers from the learner records
-page; existing admission numbers are not changed.
+page; existing manifest numbers are not changed.
+Learner records also support an optional manually entered Admission No.
+Employment outcomes are linked to a learner with an Admission No and retain
+both the Admission No and Manifest Number.
 
 The **Register Learner** and **Employment Outcomes** pages also support in-app
 batch entry. Add rows in the grid or paste them from a spreadsheet, then save up
-to 3,000 records together. Learner batches generate admission numbers
+to 3,000 records together. Learner batches generate manifest numbers
 automatically, and a batch is rejected as a whole if any entered row is invalid.
 
 ## Streamlit Community Cloud + Supabase

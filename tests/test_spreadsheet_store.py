@@ -127,7 +127,8 @@ class GoogleSheetsStoreTests(unittest.TestCase):
         headers = [
             "Record ID",
             "No",
-            "Admission Number",
+            "Manifest Number",
+            "Admission No",
             "Telephone No",
             "Registration Year",
         ]
@@ -139,9 +140,33 @@ class GoogleSheetsStoreTests(unittest.TestCase):
             {
                 "Record ID": "id",
                 "No": "record_no",
-                "Admission Number": "individual_no",
+                "Manifest Number": "individual_no",
+                "Admission No": "admission_no",
                 "Telephone No": "phone",
                 "Registration Year": "year",
+            },
+        )
+
+    def test_normalizes_legacy_admission_number_header(self):
+        normalized = GoogleSheetsStore._normalize_headers(
+            LEARNER_SHEET,
+            ["Admission Number"],
+        )
+
+        self.assertEqual(normalized, {"Admission Number": "individual_no"})
+
+    def test_normalizes_employment_admission_and_manifest_headers(self):
+        normalized = GoogleSheetsStore._normalize_headers(
+            EMPLOYMENT_SHEET,
+            ["Admission No", "Manifest Number", "Admission Number"],
+        )
+
+        self.assertEqual(
+            normalized,
+            {
+                "Admission No": "admission_no",
+                "Manifest Number": "individual_no",
+                "Admission Number": "individual_no",
             },
         )
 
@@ -162,13 +187,13 @@ class GoogleSheetsStoreTests(unittest.TestCase):
             store.initialize()
 
         ranges_written = [call.args[1] for call in write_values.call_args_list]
-        self.assertIn("B1:AC1", ranges_written)
+        self.assertIn("B1:AD1", ranges_written)
         self.assertEqual(write_values.call_args_list[0].args[0], "Learners")
         self.assertFalse(any("A2" in cell_range for cell_range in ranges_written))
         request_body = request.call_args.kwargs["body"]["data"]
         self.assertEqual(
             [update["range"] for update in request_body],
-            ["Learners!B2", "Learners!AC2"],
+            ["Learners!B2", "Learners!AD2"],
         )
         self.assertTrue(store._initialized)
 
