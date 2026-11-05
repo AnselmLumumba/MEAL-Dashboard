@@ -60,7 +60,7 @@ from notification_events import audit_notification
 
 # =========================================================
 
-st.set_page_config(page_title="UN Kakuma MEAL Dashboard", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Don Bosco Kakuma MEAL Dashboard", page_icon="📊", layout="wide")
 
 APP_DIR = Path(__file__).parent
 
@@ -93,7 +93,7 @@ except (FileNotFoundError, KeyError, AttributeError):
           GOOGLE_SHEETS_SPREADSHEET_ID = DEFAULT_GOOGLE_SHEETS_SPREADSHEET_ID
           GOOGLE_SHEETS_SERVICE_ACCOUNT = None
 
-LOGO_FILE = APP_DIR / "anselm.jpg"
+LOGO_FILE = APP_DIR / "ee.png"
 
 REPORT_TEMPLATE_NAME = "END SEPTEMBER 2026 STATISTICAL REPORT.xlsx"
 DEFAULT_REPORT_TEMPLATE = APP_DIR.parent.parent / REPORT_TEMPLATE_NAME
@@ -1597,7 +1597,7 @@ def show_branding():
 
           with right:
 
-                    st.markdown(f"""<div class="dbk-header"><div class="dbk-tagline">MONITORING, EVALUATION, ACCOUNTABILITY AND LEARNING</div><h1>UN Kakuma</h1><p>MEAL Monitoring Dashboard | {datetime.now():%d %B %Y}</p></div>""", unsafe_allow_html=True)
+                    st.markdown(f"""<div class="dbk-header"><div class="dbk-tagline">MONITORING, EVALUATION, ACCOUNTABILITY AND LEARNING</div><h1>Don Bosco Kakuma</h1><p>MEAL Monitoring Dashboard | {datetime.now():%d %B %Y}</p></div>""", unsafe_allow_html=True)
 
 
 
@@ -2778,7 +2778,7 @@ def generate_statistical_report(frame, employment_frame, template_bytes=None):
 
                     ["Report generated", datetime.now().strftime("%d %B %Y %H:%M")],
 
-                    ["Data source", "UN Kakuma MEAL database"],
+                    ["Data source", "Don Bosco Kakuma MEAL database"],
 
                     ["Student records included", len(frame)],
 
@@ -2923,7 +2923,7 @@ if st.session_state.user is None:
                               <div class="welcome-hero">
                                 <div>
                                   <div class="welcome-kicker"><span class="welcome-status"></span> Monitoring workspace · {datetime.now():%d %B %Y}</div>
-                                  <div class="welcome-title">UN Kakuma<br>MEAL Insights</div>
+                                  <div class="welcome-title">Don Bosco Kakuma<br>MEAL Insights</div>
                                   <div class="welcome-copy">A central view of learner registration, education progress and employment outcomes — built to support clear, evidence-led decisions.</div>
                                 </div>
                                 <div class="welcome-chart" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span></div>
@@ -3147,7 +3147,7 @@ if not is_admin and user_centre not in CENTRES:
 st.sidebar.markdown(
           """
           <div class="meal-brand">
-            <div class="meal-brand-kicker">UN Kakuma</div>
+            <div class="meal-brand-kicker">Don Bosco Kakuma</div>
             <div class="meal-brand-title">MEAL INSIGHTS</div>
             <div class="meal-brand-subtitle">Monitoring workspace</div>
           </div>
@@ -4048,6 +4048,10 @@ elif page == "Upload Student Data":
           st.write("Use the shared student-register template. Download it, fill in the same column headings, then upload CSV or Excel.")
           show_student_template_downloads("upload_template")
           uploaded = st.file_uploader("Choose student register file", type=["csv", "xlsx"])
+          st.caption(
+                    "Cells may be left blank, including Name; rows with blank names are imported. "
+                    "Invalid values and duplicate learner names are still reported and skipped."
+          )
 
           last_import = st.session_state.get("last_student_import_result")
           if last_import and (uploaded is None or last_import["signature"] == hashlib.sha256(uploaded.getvalue()).hexdigest()):
@@ -4095,7 +4099,6 @@ elif page == "Upload Student Data":
                               up = up[fields].copy()
                               source_rows = len(up)
                               unnamed_rows = up.index[up["name"].astype(str).str.strip() == ""].tolist()
-                              up = up[up["name"].astype(str).str.strip() != ""].copy()
                               # Parse progress from Remarks in the supplied register. A blank remark/status means ongoing.
                               for idx, row in up.iterrows():
                                         parsed_status, parsed_month, parsed_quarter = parse_student_remarks(row.get("remarks", ""))
@@ -4107,17 +4110,17 @@ elif page == "Upload Student Data":
                                                   up.at[idx, "dropout_quarter"] = parsed_quarter
                               if not is_admin:
                                         up["institutional_identifier"] = user_centre
-                              st.write(f"**Rows in file:** {source_rows} · **Rows ready for review:** {len(up)} · **Rows with no name:** {len(unnamed_rows)}")
+                              st.write(f"**Rows in file:** {source_rows} · **Rows ready for review:** {len(up)} · **Rows with no name:** {len(unnamed_rows)} (will still be imported)")
                               if unnamed_rows:
-                                        st.warning("Rows without a Name are not imported. They will be listed in the import issues report.")
+                                        st.info("Rows without a Name will still be imported with the Name field left blank.")
                               st.dataframe(
                                         up.head(30).rename(columns={"individual_no": "Admission Number"}),
                                         use_container_width=True,
                                         hide_index=True,
                               )
                               if st.button("Import Student Data", type="primary", use_container_width=True):
-                                        imported, skipped = 0, len(unnamed_rows)
-                                        issues = [f"Row {index + 2}: Name is blank." for index in unnamed_rows]
+                                        imported, skipped = 0, 0
+                                        issues = []
                                         pending_sheet_records = []
                                         with get_connection() as conn:
                                                   conn.execute("BEGIN IMMEDIATE")
@@ -4159,14 +4162,14 @@ elif page == "Upload Student Data":
                                                             course_val = str(row["course"]).strip()
                                                             centre_val = str(row["institutional_identifier"]).strip()
                                                             normalized_name = normalize_learner_name(name)
-                                                            if normalized_name in existing_names:
+                                                            if normalized_name and normalized_name in existing_names:
                                                                       skipped += 1
                                                                       issue(
                                                                                 "A learner with the same name already exists; "
                                                                                 "duplicate learner names are not imported."
                                                                       )
                                                                       continue
-                                                            if centre_val not in CENTRES:
+                                                            if centre_val and centre_val not in CENTRES:
                                                                       skipped += 1; issue(f"Institutional Identifier must match a centre: {centre_val!r}."); continue
                                                             if not is_admin and centre_val != user_centre:
                                                                       skipped += 1; issue(f"Centre heads may only import records for {user_centre!r}."); continue
@@ -4238,13 +4241,19 @@ elif page == "Upload Student Data":
                                                                       year_val is None or not 2000 <= year_val <= 2100
                                                             ):
                                                                       skipped += 1; issue("Invalid registration year."); continue
-                                                            if not individual_no and (
-                                                                      year_val is None or not 2000 <= year_val <= 2100
+                                                            if (
+                                                                      not individual_no
+                                                                      and course_val
+                                                                      and not course_admission_code(course_val)
                                                             ):
-                                                                      skipped += 1; issue("A valid registration year is required to generate an admission number."); continue
-                                                            if not individual_no and not course_admission_code(course_val):
                                                                       skipped += 1; issue(f"Cannot generate an admission number for course {course_val!r}; select a course from the current course list."); continue
-                                                            if not individual_no:
+                                                            if (
+                                                                      not individual_no
+                                                                      and centre_val in CENTRES
+                                                                      and course_admission_code(course_val)
+                                                                      and year_val is not None
+                                                                      and 2000 <= year_val <= 2100
+                                                            ):
                                                                       individual_no = generate_admission_number(
                                                                                 conn,
                                                                                 centre_val,
@@ -4303,7 +4312,8 @@ elif page == "Upload Student Data":
                                                                                           (inserted_id,),
                                                                                 ).fetchone()
                                                                       )
-                                                            existing_names.add(normalized_name)
+                                                            if normalized_name:
+                                                                      existing_names.add(normalized_name)
                                                             if individual_no:
                                                                       existing_numbers.add(individual_no)
                                                             existing_register_rows.add(
@@ -6367,6 +6377,6 @@ elif page == "Delete All Data" and is_admin:
 # =========================================================
 
 st.sidebar.markdown(
-          '<div class="meal-nav-footer">UN Kakuma<br>Monitoring · Evaluation · Accountability · Learning</div>',
+          '<div class="meal-nav-footer">Don Bosco Kakuma<br>Monitoring · Evaluation · Accountability · Learning</div>',
           unsafe_allow_html=True,
 )
