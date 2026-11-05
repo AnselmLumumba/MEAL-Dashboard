@@ -9,6 +9,7 @@ from spreadsheet_store import (
     USER_ACCOUNT_SHEET,
     GoogleSheetsStore,
     SpreadsheetStoreError,
+    normalize_record_id,
 )
 
 
@@ -238,6 +239,36 @@ class GoogleSheetsStoreTests(unittest.TestCase):
             [["42", "Amina B.", "DBK"]],
         )
 
+    def test_updates_record_when_sheets_formats_large_id_in_scientific_notation(self):
+        store = self.make_store()
+        selected_id = 4_123_456_789_012_345_678
+        formatted_id = str(float(selected_id))
+        rows = [
+            ["Record ID", "Name"],
+            [formatted_id, "Amina"],
+        ]
+        with (
+            patch.object(store, "_get_values", return_value=rows),
+            patch.object(store, "_write_values") as write_values,
+        ):
+            before, after = store.update_record(
+                "learners",
+                int(float(formatted_id)),
+                {"name": "Amina B."},
+            )
+
+        self.assertEqual(before["name"], "Amina")
+        self.assertEqual(after["name"], "Amina B.")
+        write_values.assert_called_once()
+
+    def test_matches_large_record_ids_with_scientific_notation(self):
+        large_id = 4_123_456_789_012_345_678
+
+        self.assertEqual(
+            normalize_record_id(str(float(large_id))),
+            str(int(float(str(float(large_id))))),
+        )
+
     def test_bulk_inserts_3056_records_in_batches(self):
         store = self.make_store()
         headers = [label for _, label in LEARNER_SHEET.fields]
@@ -258,6 +289,19 @@ class GoogleSheetsStoreTests(unittest.TestCase):
         self.assertEqual(len(saved), len(records))
         self.assertEqual(saved[0]["name"], "Learner 0")
         self.assertEqual(saved[-1]["name"], "Learner 3055")
+
+    def test_stores_generated_record_ids_as_text(self):
+        store = self.make_store()
+        with (
+            patch.object(store, "_get_values", return_value=[["Record ID", "Name"]]),
+            patch.object(store, "_request") as request,
+            patch("spreadsheet_store.secrets.randbelow", return_value=4_123_456_789_012_345_678),
+        ):
+            saved = store.insert_records("learners", [{"name": "Amina"}])
+
+        submitted_id = request.call_args.kwargs["body"]["values"][0][0]
+        self.assertIsInstance(submitted_id, str)
+        self.assertEqual(submitted_id, str(saved[0]["id"]))
 
     def test_deletes_matching_rows_in_descending_order(self):
         store = self.make_store()
@@ -283,6 +327,27 @@ class GoogleSheetsStoreTests(unittest.TestCase):
             ],
             [3, 1],
         )
+
+    def test_deletes_record_when_sheets_formats_large_id_in_scientific_notation(self):
+        store = self.make_store()
+        selected_id = 4_123_456_789_012_345_678
+        rows = [
+            ["Record ID", "Name"],
+            [str(float(selected_id)), "Amina"],
+        ]
+        with (
+            patch.object(store, "_get_values", return_value=rows),
+            patch.object(store, "_sheet_id", return_value=7),
+            patch.object(store, "_request") as request,
+        ):
+            deleted = store.delete_records(
+                "learners",
+                [int(float(str(float(selected_id))))],
+            )
+
+        self.assertEqual(len(deleted), 1)
+        self.assertEqual(deleted[0]["name"], "Amina")
+        request.assert_called_once()
 
     def test_deletes_duplicate_names_by_sheet_row_position(self):
         store = self.make_store()

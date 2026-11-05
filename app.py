@@ -39,6 +39,7 @@ from spreadsheet_store import (
           GoogleSheetsStore,
           SpreadsheetStoreError,
           USER_ACCOUNT_ID_MAX,
+          normalize_record_id,
 )
 from email_notifications import (
           EmailNotificationError,
@@ -409,9 +410,20 @@ def get_record_frame(table):
                               store.read_records(table),
                               columns=definition.field_names,
                     )
+                    if "id" in frame.columns:
+                              frame["id"] = pd.Series(
+                                        [
+                                                  int(normalize_record_id(value))
+                                                  if value is not None and not pd.isna(value)
+                                                  else None
+                                                  for value in frame["id"]
+                                        ],
+                                        index=frame.index,
+                                        dtype=object,
+                              )
                     if "id" in frame.columns and not frame.empty:
                               frame = frame.sort_values("id", ascending=False, kind="stable")
-                    for column in ("id", "age", "year", "graduation_year", "monthly_income"):
+                    for column in ("age", "year", "graduation_year", "monthly_income"):
                               if column in frame.columns:
                                         frame[column] = pd.to_numeric(frame[column], errors="coerce")
                     return frame.reset_index(drop=True)

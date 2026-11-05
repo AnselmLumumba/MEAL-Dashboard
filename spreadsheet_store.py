@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import secrets
 import threading
 import time
@@ -65,6 +66,24 @@ def _parse_approval_value(value: Any) -> int:
         return int(numeric_value)
     except (InvalidOperation, TypeError, ValueError) as error:
         raise ValueError("Invalid account approval value.") from error
+
+
+def normalize_record_id(value: Any) -> str:
+    normalized = str(value).strip()
+    if isinstance(value, float) or "e" in normalized.lower():
+        try:
+            numeric_value = float(normalized)
+            if math.isfinite(numeric_value) and numeric_value.is_integer():
+                return str(int(numeric_value))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    try:
+        numeric_id = Decimal(normalized)
+        if numeric_id.is_finite() and numeric_id == numeric_id.to_integral_value():
+            return str(int(numeric_id))
+    except (InvalidOperation, TypeError, ValueError, OverflowError):
+        pass
+    return normalized
 
 
 class SpreadsheetStoreError(RuntimeError):
@@ -1033,9 +1052,13 @@ class GoogleSheetsStore:
             saved["created_at"] = saved.get("created_at") or datetime.now().isoformat(timespec="seconds")
             saved_records.append(saved)
             rows.append([
-                self._format_value(saved.get(field_by_header.get(header)))
-                if field_by_header.get(header)
-                else ""
+                str(saved["id"])
+                if field_by_header.get(header) == "id"
+                else (
+                    self._format_value(saved.get(field_by_header.get(header)))
+                    if field_by_header.get(header)
+                    else ""
+                )
                 for header in headers
             ])
 
@@ -1074,7 +1097,7 @@ class GoogleSheetsStore:
             raise SpreadsheetStoreError(f"The {definition.title} tab has no Record ID column.")
         for row_number, row in enumerate(values[1:], start=2):
             padded = row + [""] * (len(headers) - len(row))
-            if str(padded[id_index]).strip() != str(record_id):
+            if normalize_record_id(padded[id_index]) != normalize_record_id(record_id):
                 continue
             before = self._record_from_row(definition, headers, padded, field_by_header)
             after = dict(before)
@@ -1106,13 +1129,13 @@ class GoogleSheetsStore:
         )
         if id_index is None:
             raise SpreadsheetStoreError(f"The {definition.title} tab has no Record ID column.")
-        target_ids = {str(record_id) for record_id in record_ids}
+        target_ids = {normalize_record_id(record_id) for record_id in record_ids}
         matched = []
         requests_body = []
         sheet_id = None
         for row_number, row in enumerate(values[1:], start=2):
             padded = row + [""] * (len(headers) - len(row))
-            if str(padded[id_index]).strip() in target_ids:
+            if normalize_record_id(padded[id_index]) in target_ids:
                 matched.append(self._record_from_row(definition, headers, padded, field_by_header))
                 if sheet_id is None:
                     sheet_id = self._sheet_id(definition.title)
