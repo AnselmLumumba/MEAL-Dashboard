@@ -20,6 +20,7 @@ import base64
 from html import escape
 
 import json
+import math
 import os
 import re
 import secrets
@@ -234,6 +235,7 @@ STATUS_DETAILS = [
           "Dropped out Q1", "Dropped out Q2", "Dropped out Q3", "Dropped out Q4"
 ]
 STATUSES = ["Ongoing"] + STATUS_DETAILS
+MAX_BATCH_RECORDS = 3000
 
 DB_ERRORS = (sqlite3.Error, psycopg.Error)
 DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError, psycopg.IntegrityError)
@@ -1321,6 +1323,66 @@ def safe_int(value):
                     return None
 
 
+def batch_value_is_set(value):
+          if value is None:
+                    return False
+          try:
+                    if pd.isna(value):
+                              return False
+          except (TypeError, ValueError, OverflowError):
+                    pass
+          return bool(str(value).strip())
+
+
+def strict_batch_int(value):
+          if not batch_value_is_set(value):
+                    return None
+          try:
+                    numeric_value = float(str(value).strip())
+                    return int(numeric_value) if numeric_value.is_integer() else None
+          except (ValueError, TypeError, OverflowError):
+                    return None
+
+
+def batch_text(value):
+          return str(value).strip() if batch_value_is_set(value) else None
+
+
+def batch_row_has_content(row, default_values=None):
+          default_values = default_values or {}
+          for field, value in row.items():
+                    if not batch_value_is_set(value):
+                              continue
+                    if field in default_values:
+                              default_value = default_values[field]
+                              expected_values = (
+                                        default_value
+                                        if isinstance(default_value, (tuple, list, set))
+                                        else (default_value,)
+                              )
+                              if field == "follow_up_date" and any(
+                                        str(value)[:10] == str(expected)[:10]
+                                        for expected in expected_values
+                              ):
+                                        continue
+                              if field != "follow_up_date":
+                                        matches_default = False
+                                        for expected in expected_values:
+                                                  try:
+                                                            matches_default = (
+                                                                      float(value)
+                                                                      == float(expected)
+                                                            )
+                                                  except (TypeError, ValueError, OverflowError):
+                                                            matches_default = value == expected
+                                                  if matches_default:
+                                                            break
+                                        if matches_default:
+                                                  continue
+                    return True
+          return False
+
+
 
 
 
@@ -1612,6 +1674,33 @@ def parse_student_remarks(remarks):
                     if low in ("completed", "complete"):
                               status = "Completed"
           return status, completion_month, dropout_quarter
+
+
+def normalize_student_status(status, remarks):
+          parsed_status, parsed_month, parsed_quarter = parse_student_remarks(remarks)
+          final_status = status
+          final_month = parsed_month
+          final_quarter = parsed_quarter
+          if status == "Ongoing" and remarks.strip() and (
+                    "completed" in remarks.lower() or "drop" in remarks.lower()
+          ):
+                    final_status = parsed_status
+          elif status.startswith("Completed in "):
+                    final_status = "Completed"
+                    final_month = status.replace("Completed in ", "", 1)
+                    final_quarter = None
+          elif status.startswith("Dropped out Q"):
+                    final_status = "Dropped"
+                    final_quarter = status.replace("Dropped out ", "", 1)
+                    final_month = None
+          else:
+                    final_month = None
+                    final_quarter = None
+          return (
+                    final_status,
+                    final_month if final_status == "Completed" and final_month else None,
+                    final_quarter if final_status == "Dropped" and final_quarter else None,
+          )
 
 
 def student_format_export(frame):
@@ -3405,24 +3494,10 @@ elif page == "Register Learner":
                               )
                     else:
                               try:
-                                        parsed_status, parsed_month, parsed_quarter = parse_student_remarks(remarks)
-                                        final_status = status
-                                        final_month = parsed_month
-                                        final_quarter = parsed_quarter
-                                        # The selected exact status is authoritative; Remarks may supply a detail only when Ongoing was selected.
-                                        if status == "Ongoing" and remarks.strip() and ("completed" in remarks.lower() or "drop" in remarks.lower()):
-                                                  final_status = parsed_status
-                                        elif status.startswith("Completed in "):
-                                                  final_status = "Completed"
-                                                  final_month = status.replace("Completed in ", "", 1)
-                                                  final_quarter = None
-                                        elif status.startswith("Dropped out Q"):
-                                                  final_status = "Dropped"
-                                                  final_quarter = status.replace("Dropped out ", "", 1)
-                                                  final_month = None
-                                        else:
-                                                  final_month = None
-                                                  final_quarter = None
+                                        final_status, final_month, final_quarter = normalize_student_status(
+                                                  status,
+                                                  remarks.strip(),
+                                        )
                                         with get_connection() as conn:
                                                   conn.execute("BEGIN IMMEDIATE")
                                                   individual_no = generate_admission_number(
@@ -3503,6 +3578,462 @@ elif page == "Register Learner":
                                         st.error(f"Could not save student: {e}")
                               except ValueError as e:
                                         st.error(f"Could not generate an admission number: {e}")
+
+          st.divider()
+          st.subheader("Batch register learners")
+          st.caption(
+                    "Enter records in the grid or paste rows from a spreadsheet. "
+                    f"Save up to {MAX_BATCH_RECORDS:,} learners at once; admission numbers are generated automatically."
+          )
+          if not is_admin:
+                    st.caption(f"All saved learners will be assigned to {user_centre}.")
+          if st.session_state.pop("learner_batch_saved", None):
+                    saved_count = st.session_state.pop("learner_batch_saved_count", 0)
+                    st.success(f"Saved {saved_count:,} learner record(s).")
+          st.session_state.setdefault("learner_batch_editor_version", 0)
+          learner_batch_columns = [
+                    "record_no",
+                    *(["centre"] if is_admin else []),
+                    "name",
+                    "gender",
+                    "age",
+                    "disability",
+                    "nationality",
+                    "location",
+                    "phone",
+                    "education",
+                    "course",
+                    "kasi",
+                    "duration",
+                    "certification",
+                    "status",
+                    "sponsor",
+                    "school_fee",
+                    "payment",
+                    "payment_confirmation_no",
+                    "year",
+                    "reason",
+                    "remarks",
+          ]
+          learner_batch_input = pd.DataFrame(
+                    {
+                              field: [
+                                        None if field in {"age", "year"} else ""
+                              ]
+                              for field in learner_batch_columns
+                    }
+          )
+          learner_education_levels = [
+                    "None",
+                    "No formal education",
+                    "Primary",
+                    "Secondary",
+                    "Craft Certificate",
+                    "Artisan",
+                    "Trade Test",
+                    "National Foundation Certificate",
+                    "NTFQ",
+                    "KASNEB",
+                    "University Certificate",
+                    "Diploma",
+                    "Degree",
+                    "Other",
+          ]
+          learner_certifications = [
+                    "NITA",
+                    "TVET/CDACC",
+                    "KNEC",
+                    "KASNEB",
+                    "Internal",
+                    "Institutional",
+                    "Other",
+                    "Not specified",
+          ]
+          learner_batch_config = {
+                    "record_no": st.column_config.TextColumn("No"),
+                    "name": st.column_config.TextColumn("Name *", required=True),
+                    "gender": st.column_config.SelectboxColumn(
+                              "Gender",
+                              options=["", *GENDERS],
+                    ),
+                    "age": st.column_config.NumberColumn(
+                              "Age",
+                              min_value=1,
+                              max_value=100,
+                              step=1,
+                    ),
+                    "disability": st.column_config.SelectboxColumn(
+                              "Disability",
+                              options=["", "No", "Yes", "Not specified"],
+                    ),
+                    "nationality": st.column_config.SelectboxColumn(
+                              "Nationality",
+                              options=["", *NATIONALITIES],
+                    ),
+                    "location": st.column_config.TextColumn("Location"),
+                    "phone": st.column_config.TextColumn("Telephone No"),
+                    "education": st.column_config.SelectboxColumn(
+                              "Highest Education Level",
+                              options=["", *learner_education_levels],
+                    ),
+                    "course": st.column_config.SelectboxColumn(
+                              "Current Course *",
+                              options=["", *COURSES],
+                              required=True,
+                    ),
+                    "kasi": st.column_config.SelectboxColumn(
+                              "KASI",
+                              options=["", "No", "Yes", "Not specified"],
+                    ),
+                    "duration": st.column_config.TextColumn("Duration"),
+                    "certification": st.column_config.SelectboxColumn(
+                              "Certification",
+                              options=["", *learner_certifications],
+                    ),
+                    "status": st.column_config.SelectboxColumn(
+                              "Student Status",
+                              options=["", *STATUSES],
+                    ),
+                    "sponsor": st.column_config.TextColumn("Sponsor"),
+                    "school_fee": st.column_config.TextColumn("School fee"),
+                    "payment": st.column_config.TextColumn("Payment"),
+                    "payment_confirmation_no": st.column_config.TextColumn(
+                              "Payment Confirmation No"
+                    ),
+                    "year": st.column_config.NumberColumn(
+                              "Registration Year",
+                              min_value=2000,
+                              max_value=2100,
+                              step=1,
+                    ),
+                    "reason": st.column_config.TextColumn("Reason"),
+                    "remarks": st.column_config.TextColumn("Remarks"),
+          }
+          if is_admin:
+                    learner_batch_config["centre"] = st.column_config.SelectboxColumn(
+                              "Institutional Identifier / Centre",
+                              options=["", *CENTRES],
+                              required=True,
+                    )
+          learner_batch_defaults = {
+                    "gender": "Male",
+                    "disability": "No",
+                    "nationality": NATIONALITIES[0],
+                    "education": "None",
+                    "kasi": "No",
+                    "certification": "NITA",
+                    "status": "Ongoing",
+                    "age": (18, 1),
+                    "year": (datetime.now().year, 2000),
+          }
+          if is_admin:
+                    learner_batch_defaults["centre"] = CENTRES[0]
+
+          with st.form(
+                    f"learner_batch_form_{st.session_state.learner_batch_editor_version}"
+          ):
+                    learner_batch_edit = st.data_editor(
+                              learner_batch_input,
+                              column_config=learner_batch_config,
+                              num_rows="dynamic",
+                              height=500,
+                              hide_index=True,
+                              width="stretch",
+                              alt="Editable learner records for batch registration.",
+                              key=(
+                                        "learner_batch_editor_"
+                                        f"{st.session_state.learner_batch_editor_version}"
+                              ),
+                    )
+                    learner_batch_submitted = st.form_submit_button(
+                              "Save learner batch",
+                              type="primary",
+                              width="stretch",
+                    )
+
+          if learner_batch_submitted:
+                    learner_rows = []
+                    learner_batch_issues = []
+                    existing_names = {
+                              normalize_learner_name(name)
+                              for name in df_all.get("name", pd.Series(dtype=str))
+                              if batch_value_is_set(name)
+                    }
+                    for row_number, row in enumerate(
+                              learner_batch_edit.to_dict(orient="records"),
+                              start=1,
+                    ):
+                              if not batch_row_has_content(
+                                        row,
+                                        learner_batch_defaults,
+                              ):
+                                        continue
+                              row_issues = []
+                              name = batch_text(row.get("name")) or ""
+                              if not name:
+                                        row_issues.append("Student name is required.")
+                              else:
+                                        normalized_name = normalize_learner_name(name)
+                                        if normalized_name in existing_names:
+                                                  row_issues.append(
+                                                            "A learner with the same name already exists."
+                                                  )
+                                        else:
+                                                  existing_names.add(normalized_name)
+
+                              centre = (
+                                        batch_text(row.get("centre")) or ""
+                                        if is_admin
+                                        else user_centre
+                              )
+                              if centre not in CENTRES:
+                                        row_issues.append("Select a valid centre.")
+                              course = batch_text(row.get("course")) or ""
+                              if course not in COURSES:
+                                        row_issues.append("Select a valid current course.")
+                              elif course_admission_code(course) is None:
+                                        row_issues.append(
+                                                  f"No admission-number code is configured for {course!r}."
+                                        )
+
+                              age = (
+                                        strict_batch_int(row.get("age"))
+                                        if batch_value_is_set(row.get("age"))
+                                        else 18
+                              )
+                              if age is None or not 1 <= age <= 100:
+                                        row_issues.append("Age must be a whole number from 1 to 100.")
+                              year = (
+                                        strict_batch_int(row.get("year"))
+                                        if batch_value_is_set(row.get("year"))
+                                        else datetime.now().year
+                              )
+                              if year is None or not 2000 <= year <= 2100:
+                                        row_issues.append(
+                                                  "Registration Year must be a whole number from 2000 to 2100."
+                                        )
+
+                              gender = batch_text(row.get("gender")) or "Male"
+                              if gender not in GENDERS:
+                                        row_issues.append("Gender must be Male or Female.")
+                              disability = batch_text(row.get("disability")) or "No"
+                              if disability not in ("No", "Yes", "Not specified"):
+                                        row_issues.append("Select a valid disability value.")
+                              nationality = (
+                                        batch_text(row.get("nationality"))
+                                        or NATIONALITIES[0]
+                              )
+                              if nationality not in NATIONALITIES:
+                                        row_issues.append("Select a valid nationality.")
+                              education = (
+                                        batch_text(row.get("education")) or "None"
+                              )
+                              if education not in learner_education_levels:
+                                        row_issues.append(
+                                                  "Select a valid education level."
+                                        )
+                              certification = (
+                                        batch_text(row.get("certification")) or "NITA"
+                              )
+                              if certification not in learner_certifications:
+                                        row_issues.append("Select a valid certification.")
+                              kasi = batch_text(row.get("kasi")) or "No"
+                              if kasi not in ("No", "Yes", "Not specified"):
+                                        row_issues.append("Select a valid KASI value.")
+                              status = batch_text(row.get("status")) or "Ongoing"
+                              if status not in STATUSES:
+                                        row_issues.append("Select a valid student status.")
+
+                              if row_issues:
+                                        learner_batch_issues.extend(
+                                                  {
+                                                            "Row": row_number,
+                                                            "Issue": issue,
+                                                  }
+                                                  for issue in row_issues
+                                        )
+                                        continue
+
+                              remarks = batch_text(row.get("remarks")) or ""
+                              final_status, completion_month, dropout_quarter = (
+                                        normalize_student_status(status, remarks)
+                              )
+                              reason = batch_text(row.get("reason"))
+                              learner_rows.append(
+                                        (
+                                                  {
+                                                            "record_no": batch_text(
+                                                                      row.get("record_no")
+                                                            ),
+                                                            "institutional_identifier": centre,
+                                                            "individual_no": None,
+                                                            "name": name,
+                                                            "gender": gender,
+                                                            "age": age,
+                                                            "disability": disability,
+                                                            "nationality": nationality,
+                                                            "location": batch_text(
+                                                                      row.get("location")
+                                                            ),
+                                                            "phone": batch_text(row.get("phone")),
+                                                            "centre": centre,
+                                                            "course": course,
+                                                            "duration": batch_text(
+                                                                      row.get("duration")
+                                                            ),
+                                                            "education": education,
+                                                            "certification": certification,
+                                                            "status": final_status,
+                                                            "dropout_reason": reason,
+                                                            "year": year,
+                                                            "created_at": datetime.now().isoformat(
+                                                                      timespec="seconds"
+                                                            ),
+                                                            "completion_month": completion_month,
+                                                            "dropout_quarter": dropout_quarter,
+                                                            "kasi": kasi,
+                                                            "remarks": remarks or None,
+                                                            "sponsor": batch_text(row.get("sponsor")),
+                                                            "school_fee": batch_text(
+                                                                      row.get("school_fee")
+                                                            ),
+                                                            "payment": batch_text(row.get("payment")),
+                                                            "payment_confirmation_no": batch_text(
+                                                                      row.get("payment_confirmation_no")
+                                                            ),
+                                                            "reason": reason,
+                                                  },
+                                                  row_number,
+                                        )
+                              )
+
+                    if len(learner_rows) > MAX_BATCH_RECORDS:
+                              learner_batch_issues.append(
+                                        {
+                                                  "Row": "",
+                                                  "Issue": (
+                                                            f"A batch can contain at most "
+                                                            f"{MAX_BATCH_RECORDS:,} learner records."
+                                                  ),
+                                        }
+                              )
+                    if not learner_rows and not learner_batch_issues:
+                              learner_batch_issues.append(
+                                        {"Row": "", "Issue": "Enter at least one learner record."}
+                              )
+                    if learner_batch_issues:
+                              issue_summary = "; ".join(
+                                        (
+                                                  f"Row {issue['Row']}: "
+                                                  if issue["Row"]
+                                                  else ""
+                                        )
+                                        + issue["Issue"]
+                                        for issue in learner_batch_issues[:5]
+                              )
+                              st.error(
+                                        f"No records were saved. Resolve these "
+                                        f"{len(learner_batch_issues):,} issue(s) and submit again. "
+                                        f"{issue_summary}"
+                              )
+                              st.dataframe(
+                                        pd.DataFrame(learner_batch_issues),
+                                        hide_index=True,
+                                        width="stretch",
+                                        alt="Validation issues in the learner batch.",
+                              )
+                    else:
+                              try:
+                                        with get_connection() as conn:
+                                                  conn.execute("BEGIN IMMEDIATE")
+                                                  existing_ids = (
+                                                            df_all["individual_no"]
+                                                            .dropna()
+                                                            .astype(str)
+                                                            .tolist()
+                                                            if "individual_no" in df_all
+                                                            else []
+                                                  )
+                                                  for learner_record, _ in learner_rows:
+                                                            individual_no = generate_admission_number(
+                                                                      conn,
+                                                                      learner_record["centre"],
+                                                                      learner_record["course"],
+                                                                      learner_record["year"],
+                                                                      existing_ids=existing_ids,
+                                                            )
+                                                            learner_record["individual_no"] = individual_no
+                                                            existing_ids.append(individual_no)
+
+                                                  sheet_store = get_google_sheets_store()
+                                                  if sheet_store is not None:
+                                                            saved_learner_records = sheet_store.insert_records(
+                                                                      "learners",
+                                                                      [
+                                                                                record
+                                                                                for record, _ in learner_rows
+                                                                      ],
+                                                            )
+                                                  else:
+                                                            saved_learner_records = []
+                                                            for learner_record, _ in learner_rows:
+                                                                      columns = tuple(learner_record)
+                                                                      result = conn.execute(
+                                                                                f"INSERT INTO learners({','.join(columns)}) "
+                                                                                f"VALUES({','.join('?' for _ in columns)}) RETURNING id",
+                                                                                tuple(
+                                                                                          learner_record[column]
+                                                                                          for column in columns
+                                                                                ),
+                                                                      )
+                                                                      inserted_id = result.fetchone()["id"]
+                                                                      saved_learner_records.append(
+                                                                                dict(
+                                                                                          conn.execute(
+                                                                                                    "SELECT * FROM learners WHERE id=?",
+                                                                                                    (inserted_id,),
+                                                                                          ).fetchone()
+                                                                                )
+                                                                      )
+
+                                                  for (
+                                                            (learner_record, row_number),
+                                                            saved_record,
+                                                  ) in zip(learner_rows, saved_learner_records):
+                                                            record_audit(
+                                                                      conn,
+                                                                      user,
+                                                                      "create",
+                                                                      "learner",
+                                                                      saved_record["id"],
+                                                                      learner_record["name"],
+                                                                      after_data=audit_record_values(
+                                                                                saved_record
+                                                                      ),
+                                                                      details={
+                                                                                "source_row": row_number,
+                                                                                "batch": "in-app",
+                                                                      },
+                                                            )
+                                                  record_audit(
+                                                            conn,
+                                                            user,
+                                                            "create_batch",
+                                                            "learner_batch",
+                                                            entity_label="In-app learner batch",
+                                                            details={"saved": len(learner_rows)},
+                                                  )
+                                                  conn.commit()
+                                        st.session_state["learner_batch_saved"] = True
+                                        st.session_state["learner_batch_saved_count"] = len(
+                                                  learner_rows
+                                        )
+                                        st.session_state.learner_batch_editor_version += 1
+                                        st.rerun()
+                              except DATA_ERRORS as error:
+                                        st.error(f"Could not save learner batch: {error}")
+                              except ValueError as error:
+                                        st.error(f"Could not generate admission numbers: {error}")
 
 
 # =========================================================
@@ -3587,6 +4118,7 @@ elif page == "Upload Student Data":
                               if st.button("Import Student Data", type="primary", use_container_width=True):
                                         imported, skipped = 0, len(unnamed_rows)
                                         issues = [f"Row {index + 2}: Name is blank." for index in unnamed_rows]
+                                        pending_sheet_records = []
                                         with get_connection() as conn:
                                                   conn.execute("BEGIN IMMEDIATE")
                                                   sheet_store = get_google_sheets_store()
@@ -3754,9 +4286,8 @@ elif page == "Upload Student Data":
                                                                       "reason": reason_val or None,
                                                             }
                                                             if sheet_store is not None:
-                                                                      saved_record = sheet_store.insert_record(
-                                                                                "learners",
-                                                                                learner_record,
+                                                                      pending_sheet_records.append(
+                                                                                (learner_record, name, rownum)
                                                                       )
                                                             else:
                                                                       columns = tuple(learner_record)
@@ -3772,7 +4303,6 @@ elif page == "Upload Student Data":
                                                                                           (inserted_id,),
                                                                                 ).fetchone()
                                                                       )
-                                                            inserted_id = saved_record["id"]
                                                             existing_names.add(normalized_name)
                                                             if individual_no:
                                                                       existing_numbers.add(individual_no)
@@ -3783,17 +4313,40 @@ elif page == "Upload Student Data":
                                                                                 centre_val.casefold(),
                                                                       )
                                                             )
-                                                            record_audit(
-                                                                      conn,
-                                                                      user,
-                                                                      "import",
-                                                                      "learner",
-                                                                      inserted_id,
-                                                                      name,
-                                                                      after_data=audit_record_values(saved_record),
-                                                                      details={"file": uploaded.name, "source_row": rownum},
-                                                            )
+                                                            if sheet_store is None:
+                                                                      record_audit(
+                                                                                conn,
+                                                                                user,
+                                                                                "import",
+                                                                                "learner",
+                                                                                inserted_id,
+                                                                                name,
+                                                                                after_data=audit_record_values(saved_record),
+                                                                                details={"file": uploaded.name, "source_row": rownum},
+                                                                      )
                                                             imported += 1
+                                                  if sheet_store is not None and pending_sheet_records:
+                                                            saved_records = sheet_store.insert_records(
+                                                                      "learners",
+                                                                      [
+                                                                                record
+                                                                                for record, _, _ in pending_sheet_records
+                                                                      ],
+                                                            )
+                                                            for (
+                                                                      (_, name, rownum),
+                                                                      saved_record,
+                                                            ) in zip(pending_sheet_records, saved_records):
+                                                                      record_audit(
+                                                                                conn,
+                                                                                user,
+                                                                                "import",
+                                                                                "learner",
+                                                                                saved_record["id"],
+                                                                                name,
+                                                                                after_data=audit_record_values(saved_record),
+                                                                                details={"file": uploaded.name, "source_row": rownum},
+                                                                      )
                                                   record_audit(
                                                             conn,
                                                             user,
@@ -3817,7 +4370,7 @@ elif page == "Upload Student Data":
                                         }
                                         st.rerun()
                     except DATA_ERRORS + (ValueError,) as e:
-                              st.error(f"Could not read the uploaded file: {e}")
+                              st.error(f"Could not import student data: {e}")
 
 
 # =========================================================
@@ -4487,6 +5040,380 @@ elif page == "Employment Outcomes":
                               st.success("Employment outcome saved.")
 
                               st.rerun()
+
+          st.divider()
+          st.subheader("Batch save employment outcomes")
+          st.caption(
+                    "Enter records in the grid or paste rows from a spreadsheet. "
+                    f"Save up to {MAX_BATCH_RECORDS:,} employment outcomes at once."
+          )
+          if not is_admin:
+                    st.caption(f"All saved outcomes will be assigned to {user_centre}.")
+          if st.session_state.pop("employment_batch_saved", None):
+                    saved_count = st.session_state.pop("employment_batch_saved_count", 0)
+                    st.success(f"Saved {saved_count:,} employment outcome(s).")
+          st.session_state.setdefault("employment_batch_editor_version", 0)
+          employment_batch_columns = [
+                    "individual_no",
+                    "graduate_name",
+                    "gender",
+                    "nationality",
+                    *(["centre"] if is_admin else []),
+                    "course",
+                    "graduation_year",
+                    "employment_status",
+                    "employer_or_business",
+                    "job_title",
+                    "monthly_income",
+                    "phone",
+                    "follow_up_date",
+                    "notes",
+          ]
+          employment_batch_input = pd.DataFrame(
+                    {
+                              field: [
+                                        None
+                                        if field
+                                        in {
+                                                  "graduation_year",
+                                                  "monthly_income",
+                                                  "follow_up_date",
+                                        }
+                                        else ""
+                              ]
+                              for field in employment_batch_columns
+                    }
+          )
+          employment_batch_config = {
+                    "individual_no": st.column_config.TextColumn("Admission Number"),
+                    "graduate_name": st.column_config.TextColumn(
+                              "Graduate Full Name *",
+                              required=True,
+                    ),
+                    "gender": st.column_config.SelectboxColumn(
+                              "Gender",
+                              options=["", *GENDERS],
+                    ),
+                    "nationality": st.column_config.SelectboxColumn(
+                              "Nationality",
+                              options=["", *NATIONALITIES],
+                    ),
+                    "course": st.column_config.TextColumn("Course Completed"),
+                    "graduation_year": st.column_config.NumberColumn(
+                              "Graduation Year",
+                              min_value=2000,
+                              max_value=2100,
+                              step=1,
+                    ),
+                    "employment_status": st.column_config.SelectboxColumn(
+                              "Employment Status",
+                              options=[
+                                        "",
+                                        "Employed",
+                                        "Self-employed",
+                                        "Business owner",
+                                        "Unemployed",
+                                        "Further education",
+                                        "Unknown",
+                              ],
+                    ),
+                    "employer_or_business": st.column_config.TextColumn(
+                              "Employer / Business Name"
+                    ),
+                    "job_title": st.column_config.TextColumn("Job Title / Type of Work"),
+                    "monthly_income": st.column_config.NumberColumn(
+                              "Monthly Income (KES)",
+                              min_value=0.0,
+                              step=500.0,
+                    ),
+                    "phone": st.column_config.TextColumn("Telephone Number"),
+                    "follow_up_date": st.column_config.DateColumn(
+                              "Follow-up Date",
+                              format="YYYY-MM-DD",
+                    ),
+                    "notes": st.column_config.TextColumn("Notes / Employment details"),
+          }
+          if is_admin:
+                    employment_batch_config["centre"] = st.column_config.SelectboxColumn(
+                              "Centre",
+                              options=["", *CENTRES],
+                              required=True,
+                    )
+          employment_batch_defaults = {
+                    "gender": "Male",
+                    "nationality": NATIONALITIES[0],
+                    "employment_status": "Employed",
+                    "follow_up_date": datetime.now().date().isoformat(),
+                    "monthly_income": 0,
+                    "graduation_year": (datetime.now().year, 2000),
+          }
+          if is_admin:
+                    employment_batch_defaults["centre"] = CENTRES[0]
+
+          with st.form(
+                    f"employment_batch_form_{st.session_state.employment_batch_editor_version}"
+          ):
+                    employment_batch_edit = st.data_editor(
+                              employment_batch_input,
+                              column_config=employment_batch_config,
+                              num_rows="dynamic",
+                              height=500,
+                              hide_index=True,
+                              width="stretch",
+                              alt="Editable employment outcome records for batch saving.",
+                              key=(
+                                        "employment_batch_editor_"
+                                        f"{st.session_state.employment_batch_editor_version}"
+                              ),
+                    )
+                    employment_batch_submitted = st.form_submit_button(
+                              "Save employment batch",
+                              type="primary",
+                              width="stretch",
+                    )
+
+          if employment_batch_submitted:
+                    employment_rows = []
+                    employment_batch_issues = []
+                    employment_statuses = [
+                              "Employed",
+                              "Self-employed",
+                              "Business owner",
+                              "Unemployed",
+                              "Further education",
+                              "Unknown",
+                    ]
+                    for row_number, row in enumerate(
+                              employment_batch_edit.to_dict(orient="records"),
+                              start=1,
+                    ):
+                              if not batch_row_has_content(
+                                        row,
+                                        employment_batch_defaults,
+                              ):
+                                        continue
+                              row_issues = []
+                              graduate_name = batch_text(row.get("graduate_name")) or ""
+                              if not graduate_name:
+                                        row_issues.append("Graduate name is required.")
+                              centre_value = (
+                                        batch_text(row.get("centre")) or ""
+                                        if is_admin
+                                        else user_centre
+                              )
+                              if centre_value not in CENTRES:
+                                        row_issues.append("Select a valid centre.")
+                              gender_value = batch_text(row.get("gender")) or "Male"
+                              if gender_value not in GENDERS:
+                                        row_issues.append("Gender must be Male or Female.")
+                              nationality_value = (
+                                        batch_text(row.get("nationality"))
+                                        or NATIONALITIES[0]
+                              )
+                              if nationality_value not in NATIONALITIES:
+                                        row_issues.append("Select a valid nationality.")
+                              graduation_year = (
+                                        strict_batch_int(row.get("graduation_year"))
+                                        if batch_value_is_set(row.get("graduation_year"))
+                                        else datetime.now().year
+                              )
+                              if graduation_year is None or not 2000 <= graduation_year <= 2100:
+                                        row_issues.append(
+                                                  "Graduation Year must be a whole number from 2000 to 2100."
+                                        )
+                              employment_status_value = (
+                                        batch_text(row.get("employment_status")) or "Employed"
+                              )
+                              if employment_status_value not in employment_statuses:
+                                        row_issues.append("Select a valid employment status.")
+
+                              income = None
+                              if batch_value_is_set(row.get("monthly_income")):
+                                        try:
+                                                  income = float(row["monthly_income"])
+                                                  if not math.isfinite(income) or income < 0:
+                                                            raise ValueError
+                                                  if income == 0:
+                                                            income = None
+                                        except (TypeError, ValueError, OverflowError):
+                                                  income = None
+                                                  row_issues.append(
+                                                            "Monthly Income must be a non-negative number."
+                                                  )
+
+                              follow_up_value = row.get("follow_up_date")
+                              follow_up_date = datetime.now().date()
+                              if batch_value_is_set(follow_up_value):
+                                        try:
+                                                  parsed_follow_up = pd.to_datetime(
+                                                            follow_up_value,
+                                                            errors="raise",
+                                                  )
+                                                  if pd.isna(parsed_follow_up):
+                                                            raise ValueError
+                                                  follow_up_date = parsed_follow_up.date()
+                                        except (TypeError, ValueError, OverflowError):
+                                                  row_issues.append(
+                                                            "Follow-up Date must be a valid date."
+                                                  )
+
+                              if row_issues:
+                                        employment_batch_issues.extend(
+                                                  {
+                                                            "Row": row_number,
+                                                            "Issue": issue,
+                                                  }
+                                                  for issue in row_issues
+                                        )
+                                        continue
+                              employment_rows.append(
+                                        (
+                                                  {
+                                                            "individual_no": batch_text(
+                                                                      row.get("individual_no")
+                                                            ),
+                                                            "graduate_name": graduate_name,
+                                                            "gender": gender_value,
+                                                            "nationality": nationality_value,
+                                                            "centre": centre_value,
+                                                            "course": batch_text(row.get("course"))
+                                                            or "",
+                                                            "graduation_year": graduation_year,
+                                                            "employment_status": employment_status_value,
+                                                            "employer_or_business": batch_text(
+                                                                      row.get("employer_or_business")
+                                                            )
+                                                            or "",
+                                                            "job_title": batch_text(
+                                                                      row.get("job_title")
+                                                            )
+                                                            or "",
+                                                            "monthly_income": income,
+                                                            "phone": batch_text(row.get("phone"))
+                                                            or "",
+                                                            "follow_up_date": follow_up_date.isoformat(),
+                                                            "notes": batch_text(row.get("notes"))
+                                                            or "",
+                                                            "created_at": datetime.now().isoformat(
+                                                                      timespec="seconds"
+                                                            ),
+                                                  },
+                                                  row_number,
+                                        )
+                              )
+
+                    if len(employment_rows) > MAX_BATCH_RECORDS:
+                              employment_batch_issues.append(
+                                        {
+                                                  "Row": "",
+                                                  "Issue": (
+                                                            f"A batch can contain at most "
+                                                            f"{MAX_BATCH_RECORDS:,} employment outcomes."
+                                                  ),
+                                        }
+                              )
+                    if not employment_rows and not employment_batch_issues:
+                              employment_batch_issues.append(
+                                        {
+                                                  "Row": "",
+                                                  "Issue": "Enter at least one employment outcome.",
+                                        }
+                              )
+                    if employment_batch_issues:
+                              issue_summary = "; ".join(
+                                        (
+                                                  f"Row {issue['Row']}: "
+                                                  if issue["Row"]
+                                                  else ""
+                                        )
+                                        + issue["Issue"]
+                                        for issue in employment_batch_issues[:5]
+                              )
+                              st.error(
+                                        f"No records were saved. Resolve these "
+                                        f"{len(employment_batch_issues):,} issue(s) and submit again. "
+                                        f"{issue_summary}"
+                              )
+                              st.dataframe(
+                                        pd.DataFrame(employment_batch_issues),
+                                        hide_index=True,
+                                        width="stretch",
+                                        alt="Validation issues in the employment batch.",
+                              )
+                    else:
+                              try:
+                                        with get_connection() as conn:
+                                                  conn.execute("BEGIN IMMEDIATE")
+                                                  sheet_store = get_google_sheets_store()
+                                                  if sheet_store is not None:
+                                                            saved_employment_records = sheet_store.insert_records(
+                                                                      "employment",
+                                                                      [
+                                                                                record
+                                                                                for record, _ in employment_rows
+                                                                      ],
+                                                            )
+                                                  else:
+                                                            saved_employment_records = []
+                                                            for employment_record, _ in employment_rows:
+                                                                      columns = tuple(employment_record)
+                                                                      result = conn.execute(
+                                                                                f"INSERT INTO employment({','.join(columns)}) "
+                                                                                f"VALUES({','.join('?' for _ in columns)}) RETURNING id",
+                                                                                tuple(
+                                                                                          employment_record[column]
+                                                                                          for column in columns
+                                                                                ),
+                                                                      )
+                                                                      inserted_id = result.fetchone()["id"]
+                                                                      saved_employment_records.append(
+                                                                                dict(
+                                                                                          conn.execute(
+                                                                                                    "SELECT * FROM employment WHERE id=?",
+                                                                                                    (inserted_id,),
+                                                                                          ).fetchone()
+                                                                                )
+                                                                      )
+
+                                                  for (
+                                                            (employment_record, row_number),
+                                                            saved_record,
+                                                  ) in zip(
+                                                            employment_rows,
+                                                            saved_employment_records,
+                                                  ):
+                                                            record_audit(
+                                                                      conn,
+                                                                      user,
+                                                                      "create",
+                                                                      "employment",
+                                                                      saved_record["id"],
+                                                                      employment_record["graduate_name"],
+                                                                      after_data=audit_record_values(
+                                                                                saved_record
+                                                                      ),
+                                                                      details={
+                                                                                "source_row": row_number,
+                                                                                "batch": "in-app",
+                                                                      },
+                                                            )
+                                                  record_audit(
+                                                            conn,
+                                                            user,
+                                                            "create_batch",
+                                                            "employment_batch",
+                                                            entity_label="In-app employment batch",
+                                                            details={"saved": len(employment_rows)},
+                                                  )
+                                                  conn.commit()
+                                        st.session_state["employment_batch_saved"] = True
+                                        st.session_state["employment_batch_saved_count"] = len(
+                                                  employment_rows
+                                        )
+                                        st.session_state.employment_batch_editor_version += 1
+                                        st.rerun()
+                              except DATA_ERRORS as error:
+                                        st.error(f"Could not save employment batch: {error}")
 
           st.divider()
 

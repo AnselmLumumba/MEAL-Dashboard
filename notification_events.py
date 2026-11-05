@@ -26,6 +26,16 @@ def audit_notification(
             "Student data import completed",
             f"{actor} imported {imported} learner record(s); {skipped} row(s) skipped in {file_name}.",
         )
+    if action == "create_batch" and entity_type in {
+        "learner_batch",
+        "employment_batch",
+    }:
+        saved = int(details.get("saved") or 0)
+        entity = "learner" if entity_type == "learner_batch" else "employment"
+        return (
+            f"{entity.title()} batch saved",
+            f"{actor} saved {saved} {entity} record(s) in a batch.",
+        )
 
     entity_labels = {
         "learner": "Learner",

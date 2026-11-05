@@ -33,6 +33,21 @@ class AuditNotificationTests(unittest.TestCase):
         self.assertIn("12 learner record(s)", notification[1])
         self.assertIn("3 row(s) skipped", notification[1])
 
+    def test_summarizes_in_app_batch_saves_once(self):
+        for entity_type, expected in (
+            ("learner_batch", "12 learner record(s)"),
+            ("employment_batch", "12 employment record(s)"),
+        ):
+            with self.subTest(entity_type=entity_type):
+                notification = audit_notification(
+                    "create_batch",
+                    entity_type,
+                    "In-app batch",
+                    "Admin",
+                    {"saved": 12},
+                )
+                self.assertIn(expected, notification[1])
+
     def test_skips_per_row_import_and_bulk_reset_notifications(self):
         self.assertIsNone(
             audit_notification(

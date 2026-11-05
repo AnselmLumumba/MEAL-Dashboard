@@ -28,6 +28,7 @@ class GoogleSheetsStoreTests(unittest.TestCase):
         response.request = request
         with (
             patch.object(store, "_session") as session,
+            patch("spreadsheet_store.time.sleep") as sleep,
             self.assertRaisesRegex(
                 SpreadsheetStoreError,
                 "rate limit exceeded \\(HTTP 429\\)",
@@ -35,6 +36,92 @@ class GoogleSheetsStoreTests(unittest.TestCase):
         ):
             session.return_value.request.return_value = response
             store._request("GET")
+        self.assertEqual(session.return_value.request.call_count, 7)
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            [1, 2, 4, 8, 16, 32],
+        )
+
+    def test_retries_rate_limited_google_sheets_request(self):
+        store = self.make_store()
+        rate_limited = requests.Response()
+        rate_limited.status_code = 429
+        rate_limited.headers["Retry-After"] = "3"
+        rate_limited.url = "https://sheets.googleapis.com/test"
+        rate_limited.request = requests.Request(
+            "GET",
+            rate_limited.url,
+        ).prepare()
+        successful = requests.Response()
+        successful.status_code = 200
+        successful.url = rate_limited.url
+        successful.request = rate_limited.request
+        successful._content = b"{}"
+        with (
+            patch.object(store, "_session") as session,
+            patch("spreadsheet_store.time.sleep") as sleep,
+        ):
+            session.return_value.request.side_effect = [rate_limited, successful]
+
+            result = store._request("GET")
+
+        self.assertEqual(result, {})
+        self.assertEqual(session.return_value.request.call_count, 2)
+        sleep.assert_called_once_with(3)
+
+    def test_includes_google_quota_reason_after_rate_limit_retries(self):
+        store = self.make_store()
+        response = requests.Response()
+        response.status_code = 429
+        response.url = "https://sheets.googleapis.com/test"
+        response.request = requests.Request("GET", response.url).prepare()
+        response._content = (
+            b'{"error":{"message":"Read requests per minute quota exceeded.",'
+            b'"errors":[{"reason":"userRateLimitExceeded"}]}}'
+        )
+        with (
+            patch.object(store, "_session") as session,
+            patch("spreadsheet_store.time.sleep"),
+            self.assertRaisesRegex(
+                SpreadsheetStoreError,
+                "userRateLimitExceeded.*Read requests per minute quota exceeded",
+            ),
+        ):
+            session.return_value.request.return_value = response
+            store._request("GET")
+
+    def test_caches_successful_gets_until_a_write_succeeds(self):
+        store = self.make_store()
+        first = requests.Response()
+        first.status_code = 200
+        first.url = "https://sheets.googleapis.com/test"
+        first.request = requests.Request("GET", first.url).prepare()
+        first._content = b'{"value":1}'
+        second = requests.Response()
+        second.status_code = 200
+        second.url = first.url
+        second.request = first.request
+        second._content = b'{"value":2}'
+        write_response = requests.Response()
+        write_response.status_code = 200
+        write_response.url = first.url
+        write_response.request = requests.Request("POST", first.url).prepare()
+        with patch.object(store, "_session") as session:
+            session.return_value.request.side_effect = [
+                first,
+                write_response,
+                second,
+            ]
+
+            first_result = store._request("GET")
+            first_result["value"] = "mutated by caller"
+            cached_result = store._request("GET")
+            store._request("POST")
+            refreshed_result = store._request("GET")
+
+        self.assertEqual(cached_result, {"value": 1})
+        self.assertEqual(refreshed_result, {"value": 2})
+        self.assertEqual(session.return_value.request.call_count, 3)
 
     def test_normalizes_human_readable_headers(self):
         headers = [
@@ -104,6 +191,27 @@ class GoogleSheetsStoreTests(unittest.TestCase):
             "A2:C2",
             [["42", "Amina B.", "DBK"]],
         )
+
+    def test_bulk_inserts_3056_records_in_batches(self):
+        store = self.make_store()
+        headers = [label for _, label in LEARNER_SHEET.fields]
+        records = [{"name": f"Learner {index}"} for index in range(3056)]
+        with (
+            patch.object(store, "_get_values", return_value=[headers]) as get_values,
+            patch.object(store, "_request") as request,
+        ):
+            saved = store.insert_records("learners", records)
+
+        get_values.assert_called_once_with("Learners")
+        append_calls = request.call_args_list
+        self.assertEqual(len(append_calls), 7)
+        self.assertEqual(
+            [len(call.kwargs["body"]["values"]) for call in append_calls],
+            [500, 500, 500, 500, 500, 500, 56],
+        )
+        self.assertEqual(len(saved), len(records))
+        self.assertEqual(saved[0]["name"], "Learner 0")
+        self.assertEqual(saved[-1]["name"], "Learner 3055")
 
     def test_deletes_matching_rows_in_descending_order(self):
         store = self.make_store()

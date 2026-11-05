@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import secrets
+import threading
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -21,6 +25,12 @@ SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
 _ID_MAX = (1 << 62) - 1
 USER_ACCOUNT_ID_MAX = 999_999_999_999_999
+SHEETS_APPEND_BATCH_SIZE = 500
+SHEETS_MAX_RATE_LIMIT_RETRIES = 6
+SHEETS_MAX_RETRY_DELAY_SECONDS = 60
+SHEETS_READ_CACHE_TTL_SECONDS = 30
+SHEETS_READ_CACHE_MAX_ENTRIES = 128
+_SHEETS_RESPONSE_CACHE_LOCK = threading.RLock()
 
 
 def _parse_user_account_id(value: Any) -> int:
@@ -237,22 +247,73 @@ class GoogleSheetsStore:
         body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         url = f"{SHEETS_API}/{self.spreadsheet_id}{path}"
-        try:
-            response = self._session().request(
-                method,
+        cache_key = None
+        cache_generation = None
+        if method.upper() == "GET":
+            cache_key = (
                 url,
-                params=params,
-                json=body,
-                timeout=30,
+                json.dumps(params or {}, sort_keys=True, separators=(",", ":")),
             )
-            response.raise_for_status()
-            return response.json() if response.content else {}
+            with self._response_cache_lock():
+                cache_generation = self._get_response_cache_generation()
+                cache = self._get_response_cache()
+                cached = cache.get(cache_key)
+                if cached and cached[0] > time.monotonic():
+                    return copy.deepcopy(cached[1])
+                cache.pop(cache_key, None)
+        try:
+            for attempt in range(SHEETS_MAX_RATE_LIMIT_RETRIES + 1):
+                response = self._session().request(
+                    method,
+                    url,
+                    params=params,
+                    json=body,
+                    timeout=30,
+                )
+                try:
+                    response.raise_for_status()
+                    result = response.json() if response.content else {}
+                    if cache_key is not None:
+                        with self._response_cache_lock():
+                            if cache_generation == self._get_response_cache_generation():
+                                cache = self._get_response_cache()
+                                if len(cache) >= SHEETS_READ_CACHE_MAX_ENTRIES:
+                                    cache.pop(next(iter(cache)))
+                                cache[cache_key] = (
+                                    time.monotonic() + SHEETS_READ_CACHE_TTL_SECONDS,
+                                    copy.deepcopy(result),
+                                )
+                    else:
+                        self._invalidate_response_cache()
+                    return result
+                except requests.HTTPError as error:
+                    if (
+                        response.status_code != 429
+                        or attempt == SHEETS_MAX_RATE_LIMIT_RETRIES
+                    ):
+                        raise error
+                    retry_after = response.headers.get("Retry-After")
+                    try:
+                        delay = float(retry_after)
+                    except (TypeError, ValueError):
+                        delay = 2 ** attempt
+                    time.sleep(
+                        min(max(delay, 0), SHEETS_MAX_RETRY_DELAY_SECONDS)
+                    )
         except requests.HTTPError as error:
             status = error.response.status_code if error.response is not None else "unknown"
             if status == 429:
-                message = (
-                    "Google Sheets API rate limit exceeded (HTTP 429). "
-                    "Wait briefly and try again; repeated refreshes can extend the limit."
+                reason, detail = self._rate_limit_details(error.response)
+                message = "Google Sheets API rate limit exceeded (HTTP 429"
+                if reason:
+                    message += f"; {reason}"
+                message += ")."
+                if detail:
+                    message += f" Google reports: {detail}"
+                message += (
+                    " The app retried this request. If the limit persists, check "
+                    "Google Cloud Console for Sheets API read/write quota limits "
+                    "and usage for the service-account project."
                 )
             else:
                 message = (
@@ -270,6 +331,50 @@ class GoogleSheetsStore:
             raise SpreadsheetStoreError(
                 "Google service-account authentication failed. Check the configured credentials."
             ) from error
+
+    def _get_response_cache(self) -> dict[tuple[str, str], tuple[float, dict[str, Any]]]:
+        cache = getattr(self, "_response_cache", None)
+        if cache is None:
+            cache = {}
+            self._response_cache = cache
+        return cache
+
+    def _response_cache_lock(self) -> threading.RLock:
+        return _SHEETS_RESPONSE_CACHE_LOCK
+
+    def _get_response_cache_generation(self) -> int:
+        generation = getattr(self, "_response_cache_generation", None)
+        if generation is None:
+            generation = 0
+            self._response_cache_generation = generation
+        return generation
+
+    def _invalidate_response_cache(self) -> None:
+        with self._response_cache_lock():
+            self._get_response_cache().clear()
+            self._response_cache_generation = (
+                self._get_response_cache_generation() + 1
+            )
+
+    @staticmethod
+    def _rate_limit_details(response: requests.Response | None) -> tuple[str, str]:
+        if response is None:
+            return "", ""
+        try:
+            error = response.json().get("error", {})
+        except (ValueError, AttributeError):
+            return "", ""
+        errors = error.get("errors", [])
+        reason = next(
+            (
+                str(item["reason"])
+                for item in errors
+                if isinstance(item, dict) and item.get("reason")
+            ),
+            "",
+        )
+        detail = str(error.get("message", "")).strip()
+        return reason, detail
 
     def validate_connection(self) -> list[str]:
         metadata = self._request(
@@ -841,6 +946,15 @@ class GoogleSheetsStore:
         return records
 
     def insert_record(self, table: str, record: dict[str, Any]) -> dict[str, Any]:
+        return self.insert_records(table, [record])[0]
+
+    def insert_records(
+        self,
+        table: str,
+        records: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not records:
+            return []
         definition = self._definition(table)
         values = self._get_values(definition.title)
         headers = [str(value).strip() for value in values[0]] if values else []
@@ -849,25 +963,35 @@ class GoogleSheetsStore:
             raise SpreadsheetStoreError(
                 f"The {definition.title} tab is not initialized. Reload the app to initialize it."
             )
-        saved = {field: None for field, _ in definition.fields}
-        saved.update(record)
-        saved["id"] = secrets.randbelow(_ID_MAX) + 1
-        saved["created_at"] = saved.get("created_at") or datetime.now().isoformat(timespec="seconds")
-        row = []
-        for header in headers:
-            field = field_by_header.get(header)
-            row.append(self._format_value(saved.get(field)) if field else "")
-        self._request(
-            "POST",
-            f"/values/{self._range(definition.title, 'A1')}:append",
-            params={
-                "valueInputOption": "RAW",
-                "insertDataOption": "INSERT_ROWS",
-                "includeValuesInResponse": "false",
-            },
-            body={"values": [row]},
-        )
-        return saved
+        saved_records = []
+        rows = []
+        for record in records:
+            saved = {field: None for field, _ in definition.fields}
+            saved.update(record)
+            saved["id"] = secrets.randbelow(_ID_MAX) + 1
+            saved["created_at"] = saved.get("created_at") or datetime.now().isoformat(timespec="seconds")
+            saved_records.append(saved)
+            rows.append([
+                self._format_value(saved.get(field_by_header.get(header)))
+                if field_by_header.get(header)
+                else ""
+                for header in headers
+            ])
+
+        for offset in range(0, len(rows), SHEETS_APPEND_BATCH_SIZE):
+            self._request(
+                "POST",
+                f"/values/{self._range(definition.title, 'A1')}:append",
+                params={
+                    "valueInputOption": "RAW",
+                    "insertDataOption": "INSERT_ROWS",
+                    "includeValuesInResponse": "false",
+                },
+                body={
+                    "values": rows[offset:offset + SHEETS_APPEND_BATCH_SIZE],
+                },
+            )
+        return saved_records
 
     def update_record(
         self,

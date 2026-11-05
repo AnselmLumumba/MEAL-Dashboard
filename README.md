@@ -23,6 +23,11 @@ generate numbers for new rows that do not have one. Administrators can generate
 numbers for existing records with missing identifiers from the learner records
 page; existing admission numbers are not changed.
 
+The **Register Learner** and **Employment Outcomes** pages also support in-app
+batch entry. Add rows in the grid or paste them from a spreadsheet, then save up
+to 3,000 records together. Learner batches generate admission numbers
+automatically, and a batch is rejected as a whole if any entered row is invalid.
+
 ## Streamlit Community Cloud + Supabase
 
 The app uses PostgreSQL when `DATABASE_URL` is configured; otherwise, it uses local SQLite. The hosted database is initialized with an empty schema on first startup. The local `meal.db` is not uploaded or copied to the cloud.
@@ -50,6 +55,7 @@ The statistical report generator uses the data-free `END SEPTEMBER 2026 STATISTI
 - Remembered sign-in sessions, audit logs, and admission-number sequences remain in the configured database. Keep `DATABASE_URL` pointed at the same persistent database between deployments.
 - When Google Sheets is configured, account profiles and PBKDF2-SHA256 password hashes are stored in the `User Accounts` tab. Without Google Sheets credentials, account profiles and hashes remain in the configured database.
 - Learner and employment records can use Google Sheets when the `gcp_service_account` secret is configured.
+- Google Sheets API reads are cached for up to 30 seconds to reduce quota usage; app writes invalidate the cache.
 - Keep `meal.db`, report workbooks containing personal data, and `.streamlit/secrets.toml` out of Git.
 - New account passwords are stored using PBKDF2-SHA256. Existing legacy password hashes are upgraded after a successful login.
 
