@@ -90,6 +90,26 @@ class GoogleSheetsStoreTests(unittest.TestCase):
             session.return_value.request.return_value = response
             store._request("GET")
 
+    def test_includes_google_api_detail_for_bad_requests(self):
+        store = self.make_store()
+        response = requests.Response()
+        response.status_code = 400
+        response.url = "https://sheets.googleapis.com/test"
+        response.request = requests.Request("GET", response.url).prepare()
+        response._content = (
+            b'{"error":{"message":"Range exceeds grid limits. '
+            b'Maximum column: 29"}}'
+        )
+        with (
+            patch.object(store, "_session") as session,
+            self.assertRaisesRegex(
+                SpreadsheetStoreError,
+                "Google reports: Range exceeds grid limits",
+            ),
+        ):
+            session.return_value.request.return_value = response
+            store._request("GET")
+
     def test_caches_successful_gets_until_a_write_succeeds(self):
         store = self.make_store()
         first = requests.Response()
@@ -183,6 +203,7 @@ class GoogleSheetsStoreTests(unittest.TestCase):
             ),
             patch.object(store, "_write_values") as write_values,
             patch.object(store, "_request") as request,
+            patch.object(store, "_ensure_grid_columns"),
         ):
             store.initialize()
 
@@ -398,6 +419,64 @@ class GoogleSheetsStoreTests(unittest.TestCase):
         self.assertIn("nationality", LEARNER_SHEET.field_names)
         self.assertIn("nationality", EMPLOYMENT_SHEET.field_names)
 
+    def test_expands_grid_when_schema_needs_an_additional_column(self):
+        store = self.make_store()
+        with patch.object(
+            store,
+            "_request",
+            side_effect=[
+                {
+                    "sheets": [
+                        {
+                            "properties": {
+                                "sheetId": 4,
+                                "title": "Learners",
+                                "gridProperties": {"columnCount": 29},
+                            }
+                        }
+                    ]
+                },
+                {},
+            ],
+        ) as request:
+            store._ensure_grid_columns("Learners", 30)
+
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args_list[1].args[1], ":batchUpdate")
+        self.assertEqual(
+            request.call_args_list[1].kwargs["body"]["requests"],
+            [
+                {
+                    "appendDimension": {
+                        "sheetId": 4,
+                        "dimension": "COLUMNS",
+                        "length": 1,
+                    }
+                }
+            ],
+        )
+
+    def test_does_not_change_grid_when_it_already_has_enough_columns(self):
+        store = self.make_store()
+        with patch.object(
+            store,
+            "_request",
+            return_value={
+                "sheets": [
+                    {
+                        "properties": {
+                            "sheetId": 4,
+                            "title": "Learners",
+                            "gridProperties": {"columnCount": 30},
+                        }
+                    }
+                ]
+            },
+        ) as request:
+            store._ensure_grid_columns("Learners", 30)
+
+        request.assert_called_once()
+
     def test_initializes_user_accounts_tab_without_overwriting_other_tabs(self):
         store = self.make_store()
         with (
@@ -411,6 +490,7 @@ class GoogleSheetsStoreTests(unittest.TestCase):
             ) as request,
             patch.object(store, "_get_values", return_value=[]),
             patch.object(store, "_write_values") as write_values,
+            patch.object(store, "_ensure_grid_columns"),
         ):
             store.initialize_user_accounts()
 
@@ -441,6 +521,7 @@ class GoogleSheetsStoreTests(unittest.TestCase):
             ),
             patch.object(store, "_get_values", return_value=[existing_headers]),
             patch.object(store, "_write_values") as write_values,
+            patch.object(store, "_ensure_grid_columns"),
         ):
             store.initialize_user_accounts()
 

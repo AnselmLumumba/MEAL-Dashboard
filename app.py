@@ -5099,29 +5099,29 @@ elif page == "Employment Outcomes":
           employment_learners = [
                     record
                     for record in df.to_dict(orient="records")
-                    if batch_value_is_set(record.get("admission_no"))
-                    and batch_value_is_set(record.get("name"))
+                    if batch_value_is_set(record.get("name"))
           ]
           employment_learner_options = {
                     (
                               f"{record['id']} | {record['name']} "
-                              f"(Admission No: {record['admission_no']})"
+                              f"(Manifest No: {record.get('individual_no') or 'not assigned'}; "
+                              f"Admission No: {record.get('admission_no') or 'not assigned'})"
                     ): record
                     for record in employment_learners
           }
           selected_learner_label = st.selectbox(
-                    "Link employment record to learner",
+                    "Select learner for employment record",
                     ["", *employment_learner_options],
                     format_func=lambda label: (
-                              "Select a learner with an Admission No" if not label else label
+                              "Select a learner" if not label else label
                     ),
                     key="employment_learner_link",
           )
           linked_learner = employment_learner_options.get(selected_learner_label)
           if not employment_learners:
                     st.info(
-                              "Add an Admission No to a learner record before recording "
-                              "employment outcomes."
+                              "Register a learner before recording an employment outcome. "
+                              "The learner's name and manifest number will be linked automatically."
                     )
 
           with st.form("employment_form"):
@@ -5334,7 +5334,7 @@ elif page == "Employment Outcomes":
           )
           employment_batch_config = {
                     "linked_learner": st.column_config.SelectboxColumn(
-                              "Learner (Admission No) *",
+                              "Learner (Name / Manifest No) *",
                               options=["", *employment_learner_options],
                               required=True,
                     ),
@@ -5437,7 +5437,7 @@ elif page == "Employment Outcomes":
                               )
                               if linked_learner is None:
                                         row_issues.append(
-                                                  "Select a learner with an Admission No."
+                                                  "Select a learner by name and manifest number."
                                         )
                                         linked_learner = {}
                               graduate_name = str(linked_learner.get("name") or "").strip()

@@ -323,10 +323,13 @@ class GoogleSheetsStore:
                     "and usage for the service-account project."
                 )
             else:
+                _, detail = self._rate_limit_details(error.response)
                 message = (
                     f"Google Sheets API rejected the request (HTTP {status}). "
                     "Check the spreadsheet ID, service-account access, and enabled API."
                 )
+                if detail:
+                    message += f" Google reports: {detail}"
             raise SpreadsheetStoreError(
                 message
             ) from error
@@ -399,6 +402,47 @@ class GoogleSheetsStore:
             )
         return titles
 
+    def _ensure_grid_columns(self, title: str, required_columns: int) -> None:
+        metadata = self._request(
+            "GET",
+            params={
+                "fields": "sheets(properties(sheetId,title,gridProperties(columnCount)))"
+            },
+        )
+        properties = next(
+            (
+                sheet.get("properties", {})
+                for sheet in metadata.get("sheets", [])
+                if sheet.get("properties", {}).get("title") == title
+            ),
+            None,
+        )
+        if properties is None:
+            raise SpreadsheetStoreError(f"The spreadsheet is missing the {title} tab.")
+        current_columns = properties.get("gridProperties", {}).get("columnCount")
+        sheet_id = properties.get("sheetId")
+        if not isinstance(current_columns, int) or not isinstance(sheet_id, int):
+            raise SpreadsheetStoreError(
+                f"Could not determine the current grid size for the {title} tab."
+            )
+        if current_columns >= required_columns:
+            return
+        self._request(
+            "POST",
+            ":batchUpdate",
+            body={
+                "requests": [
+                    {
+                        "appendDimension": {
+                            "sheetId": sheet_id,
+                            "dimension": "COLUMNS",
+                            "length": required_columns - current_columns,
+                        }
+                    }
+                ]
+            },
+        )
+
     def initialize(self) -> None:
         """Validate tabs and safely add any missing schema headers."""
         if self._initialized:
@@ -409,6 +453,7 @@ class GoogleSheetsStore:
             headers = [str(value).strip() for value in (values[0] if values else [])]
             if not headers:
                 headers = [label for _, label in definition.fields]
+                self._ensure_grid_columns(definition.title, len(headers))
                 self._write_values(definition.title, "A1", [headers])
                 values = [headers]
             normalized = self._normalize_headers(definition, headers)
@@ -422,6 +467,10 @@ class GoogleSheetsStore:
                 ]
                 start = len(headers)
                 end = _column_name(start + len(appended_labels) - 1)
+                self._ensure_grid_columns(
+                    definition.title,
+                    start + len(appended_labels),
+                )
                 self._write_values(
                     definition.title,
                     f"{_column_name(start)}1:{end}1",
@@ -511,6 +560,7 @@ class GoogleSheetsStore:
         headers = [str(value).strip() for value in (values[0] if values else [])]
         if not headers:
             headers = [label for _, label in USER_ACCOUNT_SHEET.fields]
+            self._ensure_grid_columns(USER_ACCOUNT_SHEET.title, len(headers))
             self._write_values(USER_ACCOUNT_SHEET.title, "A1", [headers])
         normalized = self._normalize_headers(USER_ACCOUNT_SHEET, headers)
         missing_fields = set(USER_ACCOUNT_SHEET.field_names) - set(normalized.values())
@@ -520,11 +570,15 @@ class GoogleSheetsStore:
                 for field, label in USER_ACCOUNT_SHEET.fields
                 if field in missing_fields
             ]
+            start = len(headers)
+            self._ensure_grid_columns(
+                USER_ACCOUNT_SHEET.title,
+                start + len(appended),
+            )
             if len(appended) != len(missing_fields):
                 raise SpreadsheetStoreError(
                     "The User Accounts tab schema contains an unsupported field."
                 )
-            start = len(headers)
             try:
                 end = _column_name(start + len(appended) - 1)
                 start_column = _column_name(start)
