@@ -1,6 +1,6 @@
-# MEAL-Dashboard
+# XYZ MEL INSIGHTS
 
-Don Bosco Kakuma MEAL learner and employment monitoring app, built with Streamlit.
+Learner and employment monitoring app with a data-science focus, built with Streamlit.
 
 ## Local run
 
@@ -49,6 +49,7 @@ The app uses PostgreSQL when `DATABASE_URL` is configured; otherwise, it uses lo
 ### Excel report template
 
 The statistical report generator uses the data-free `END SEPTEMBER 2026 STATISTICAL REPORT.xlsx` template included in the repository. Other Excel workbooks remain excluded from Git. Never commit or upload a workbook containing identifiable student records.
+Generated reports include live learner totals by Vocational, Technical Grade I/II/III, ICT, Professional, KDII, and BUS Kalo course groups.
 
 ### Database behavior
 

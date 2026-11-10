@@ -15,8 +15,6 @@ from datetime import datetime, timedelta, timezone
 
 from io import BytesIO
 
-import base64
-
 from html import escape
 
 import json
@@ -52,6 +50,7 @@ from nationality import (
           REPORT_NATIONALITY_ALIASES,
           report_nationality_code,
 )
+from course_report import build_course_level_summary
 from notification_events import audit_notification
 
 
@@ -61,7 +60,7 @@ from notification_events import audit_notification
 
 # =========================================================
 
-st.set_page_config(page_title="Don Bosco Kakuma MEAL Dashboard", page_icon="📊", layout="wide")
+st.set_page_config(page_title="XYZ MEL INSIGHTS", page_icon="📊", layout="wide")
 
 APP_DIR = Path(__file__).parent
 
@@ -93,8 +92,6 @@ try:
 except (FileNotFoundError, KeyError, AttributeError):
           GOOGLE_SHEETS_SPREADSHEET_ID = DEFAULT_GOOGLE_SHEETS_SPREADSHEET_ID
           GOOGLE_SHEETS_SERVICE_ACCOUNT = None
-
-LOGO_FILE = APP_DIR / "ee.png"
 
 REPORT_TEMPLATE_NAME = "END SEPTEMBER 2026 STATISTICAL REPORT.xlsx"
 DEFAULT_REPORT_TEMPLATE = APP_DIR.parent.parent / REPORT_TEMPLATE_NAME
@@ -290,6 +287,8 @@ p,li,label{color:#35475D}
 [data-testid="stSidebar"] [data-testid="stVerticalBlock"]{gap:.45rem}
 [data-testid="stSidebar"] hr{border-color:rgba(220,231,243,.15);margin:.9rem 0}
 [data-testid="stSidebar"] [data-testid="stCaptionContainer"]{color:#8FA7C0}
+.meal-logo-mark{display:grid;place-items:center;width:118px;height:118px;margin:0 auto 1rem;background:#fff;border:2px solid #D4A017;border-radius:16px;font-size:3.7rem;line-height:1;box-shadow:0 8px 20px rgba(18,52,90,.12)}
+.meal-sidebar-logo{width:64px;height:64px;margin:0 auto .65rem;border-radius:14px;font-size:2.4rem}
 .meal-brand{padding:.45rem .35rem .9rem;text-align:center}
 .meal-brand-kicker{color:#F4D16A;font-size:.66rem;font-weight:800;letter-spacing:.19em;text-transform:uppercase}
 .meal-brand-title{color:#fff;font-size:1.2rem;font-weight:800;letter-spacing:.02em;margin-top:.14rem}
@@ -1624,37 +1623,19 @@ def backfill_missing_admission_numbers(conn, actor):
 
 
 
-def get_logo_base64():
-
-          try:
-
-                    return base64.b64encode(LOGO_FILE.read_bytes()).decode("utf-8") if LOGO_FILE.exists() else None
-
-          except OSError:
-
-                    return None
-
-
-
-
-
 def show_branding():
 
           left, right = st.columns([1, 5])
 
           with left:
-
-                    if LOGO_FILE.exists():
-
-                              st.image(str(LOGO_FILE), width=125)
-
-                    else:
-
-                              st.markdown('<div style="background:#fff;border:2px solid #D4A017;border-radius:12px;padding:22px 8px;text-align:center;color:#12345A;font-size:25px;font-weight:800">DBK</div>', unsafe_allow_html=True)
+                    st.markdown(
+                              '<div class="meal-logo-mark" role="img" aria-label="Data science logo">📊</div>',
+                              unsafe_allow_html=True,
+                    )
 
           with right:
 
-                    st.markdown(f"""<div class="dbk-header"><div class="dbk-tagline">MONITORING, EVALUATION, ACCOUNTABILITY AND LEARNING</div><h1>Don Bosco Kakuma</h1><p>MEAL Monitoring Dashboard | {datetime.now():%d %B %Y}</p></div>""", unsafe_allow_html=True)
+                    st.markdown(f"""<div class="dbk-header"><div class="dbk-tagline">DATA SCIENCE FOR MONITORING, EVALUATION AND LEARNING</div><h1>XYZ MEL INSIGHTS</h1><p>XYZ MEL INSIGHTS | {datetime.now():%d %B %Y}</p></div>""", unsafe_allow_html=True)
 
 
 
@@ -2705,6 +2686,13 @@ def generate_statistical_report(frame, employment_frame, template_bytes=None):
                     list(nationality_summary.columns),
                     as_excel_rows(nationality_summary),
           )
+          course_level_summary = build_course_level_summary(frame, normalise_status)
+          style_and_append(
+                    wb[summary_sheet_name],
+                    "LIVE COURSE COUNTS BY PROGRAMME",
+                    list(course_level_summary.columns),
+                    as_excel_rows(course_level_summary),
+          )
           style_and_append(
                     wb[summary_sheet_name],
                     "NATIONALITY CODE KEY",
@@ -2969,20 +2957,17 @@ if st.session_state.user is None:
 
           brand_column, hero_column = st.columns([0.85, 5], vertical_alignment="center")
           with brand_column:
-                    if LOGO_FILE.exists():
-                              st.image(str(LOGO_FILE), width=118)
-                    else:
-                              st.markdown(
-                                        '<div style="background:#fff;border:2px solid #D4A017;border-radius:16px;padding:24px 10px;text-align:center;color:#12345A;font-size:26px;font-weight:800">DBK</div>',
-                                        unsafe_allow_html=True,
-                              )
+                    st.markdown(
+                              '<div class="meal-logo-mark" role="img" aria-label="Data science logo">📊</div>',
+                              unsafe_allow_html=True,
+                    )
           with hero_column:
                     st.markdown(
                               f"""
                               <div class="welcome-hero">
                                 <div>
                                   <div class="welcome-kicker"><span class="welcome-status"></span> Monitoring workspace · {datetime.now():%d %B %Y}</div>
-                                  <div class="welcome-title">Don Bosco Kakuma<br>MEAL Insights</div>
+                                  <div class="welcome-title">XYZ MEL INSIGHTS</div>
                                   <div class="welcome-copy">A central view of learner registration, education progress and employment outcomes — built to support clear, evidence-led decisions.</div>
                                 </div>
                                 <div class="welcome-chart" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span></div>
@@ -3206,16 +3191,14 @@ if not is_admin and user_centre not in CENTRES:
 st.sidebar.markdown(
           """
           <div class="meal-brand">
-            <div class="meal-brand-kicker">Don Bosco Kakuma</div>
-            <div class="meal-brand-title">MEAL INSIGHTS</div>
+            <div class="meal-logo-mark meal-sidebar-logo" role="img" aria-label="Data science logo">📊</div>
+            <div class="meal-brand-kicker">Data science</div>
+            <div class="meal-brand-title">XYZ MEL INSIGHTS</div>
             <div class="meal-brand-subtitle">Monitoring workspace</div>
           </div>
           """,
           unsafe_allow_html=True,
 )
-if LOGO_FILE.exists():
-
-          st.sidebar.image(str(LOGO_FILE), width=140)
 account_meta = [escape(user["role"].replace("_", " ").title())]
 if not is_admin:
           account_meta.append(escape(user_centre or "Centre not assigned"))
@@ -6644,6 +6627,6 @@ elif page == "Delete All Data" and is_admin:
 # =========================================================
 
 st.sidebar.markdown(
-          '<div class="meal-nav-footer">Don Bosco Kakuma<br>Monitoring · Evaluation · Accountability · Learning</div>',
+          '<div class="meal-nav-footer">Data science<br>Monitoring · Evaluation · Learning</div>',
           unsafe_allow_html=True,
 )
