@@ -148,6 +148,31 @@ def send_account_approved_email(
     )
 
 
+def send_account_activation_code_email(
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+    sender_email: str,
+    recipient_email: str,
+    recipient_name: str,
+    activation_code: str,
+) -> None:
+    _send_email(
+        client_id,
+        client_secret,
+        refresh_token,
+        sender_email,
+        recipient_email,
+        "Your XYZ MEL INSIGHTS account is approved",
+        f"Hello {recipient_name.strip()},\n\n"
+        "Your account has been approved. Enter this one-time code on the login "
+        "page to activate your account:\n\n"
+        f"{activation_code}\n\n"
+        "The code expires in 30 minutes and can only be used once. "
+        "If it expires, contact an administrator to resend it.",
+    )
+
+
 def send_test_email(
     client_id: str,
     client_secret: str,

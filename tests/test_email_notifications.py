@@ -10,6 +10,7 @@ from email_notifications import (
     GMAIL_SEND_URL,
     GOOGLE_TOKEN_URL,
     EmailNotificationError,
+    send_account_activation_code_email,
     send_account_approved_email,
     send_test_email,
 )
@@ -78,6 +79,27 @@ class GmailEmailTests(unittest.TestCase):
         self.assertEqual(message["To"], "admin@example.com")
         self.assertIn("delivery test", message["Subject"].lower())
         self.assertIn("Gmail API", message.get_payload(decode=True).decode())
+
+    def test_sends_activation_code_email(self):
+        send_account_activation_code_email(
+            "client-id",
+            "client-secret",
+            "refresh-token",
+            "notifications@gmail.com",
+            "user@example.com",
+            "Amina",
+            "123456",
+        )
+
+        request = self.urlopen.call_args_list[1].args[0]
+        message = message_from_bytes(
+            base64.urlsafe_b64decode(json.loads(request.data)["raw"])
+        )
+        body = message.get_payload(decode=True).decode()
+        self.assertEqual(message["To"], "user@example.com")
+        self.assertIn("approved", message["Subject"].lower())
+        self.assertIn("123456", body)
+        self.assertIn("expires in 30 minutes", body)
 
     def test_requires_oauth_credentials(self):
         with self.assertRaisesRegex(EmailNotificationError, "not configured"):

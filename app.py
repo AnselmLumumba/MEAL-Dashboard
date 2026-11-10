@@ -41,8 +41,14 @@ from spreadsheet_store import (
 )
 from email_notifications import (
           EmailNotificationError,
+          send_account_activation_code_email,
           send_account_approved_email,
           send_test_email,
+)
+from account_verification import (
+          create_activation_code,
+          hash_activation_code,
+          verify_activation_code,
 )
 from learner_duplicates import duplicate_learner_records, normalize_learner_name
 from nationality import (
@@ -629,6 +635,12 @@ def init_db():
                                         token_hash TEXT PRIMARY KEY,
                                         user_id BIGINT NOT NULL,
                                         expires_at TEXT)""")
+                              conn.execute("""CREATE TABLE IF NOT EXISTS account_email_verifications(
+                                        user_id BIGINT PRIMARY KEY,
+                                        code_hash TEXT,
+                                        expires_at TEXT,
+                                        verified_at TEXT,
+                                        attempts INTEGER NOT NULL DEFAULT 0)""")
                               conn.execute("""CREATE TABLE IF NOT EXISTS auth_migrations(
                                         migration_key TEXT PRIMARY KEY,
                                         completed_at TEXT NOT NULL)""")
@@ -654,6 +666,13 @@ def init_db():
                               token_hash TEXT PRIMARY KEY,
                               user_id INTEGER NOT NULL,
                               expires_at TEXT)""")
+
+                    conn.execute("""CREATE TABLE IF NOT EXISTS account_email_verifications(
+                              user_id INTEGER PRIMARY KEY,
+                              code_hash TEXT,
+                              expires_at TEXT,
+                              verified_at TEXT,
+                              attempts INTEGER NOT NULL DEFAULT 0)""")
 
                     conn.execute("""CREATE TABLE IF NOT EXISTS auth_migrations(
                               migration_key TEXT PRIMARY KEY,
@@ -1197,13 +1216,119 @@ def delete_user_account(user_id):
                     deleted = store.delete_user_account(int(user_id))
                     if deleted:
                               clear_user_profile_cache()
+                              delete_account_activation_record(user_id)
                     return deleted
           with get_connection() as conn:
                     result = conn.execute("DELETE FROM users WHERE id=?", (user_id,))
                     deleted = result.rowcount > 0
+                    if deleted:
+                              conn.execute(
+                                        "DELETE FROM account_email_verifications WHERE user_id=?",
+                                        (user_id,),
+                              )
           if deleted:
                     clear_user_profile_cache()
           return deleted
+
+
+ACCOUNT_ACTIVATION_EXPIRY_MINUTES = 30
+ACCOUNT_ACTIVATION_MAX_ATTEMPTS = 5
+
+
+def create_account_activation_code(user_id):
+          code = create_activation_code()
+          expires_at = (
+                    datetime.now(timezone.utc)
+                    + timedelta(minutes=ACCOUNT_ACTIVATION_EXPIRY_MINUTES)
+          ).isoformat(timespec="seconds")
+          with get_connection() as conn:
+                    conn.execute(
+                              """INSERT INTO account_email_verifications(
+                                        user_id,code_hash,expires_at,verified_at,attempts
+                              ) VALUES(?,?,?,NULL,0)
+                              ON CONFLICT(user_id) DO UPDATE SET
+                                        code_hash=excluded.code_hash,
+                                        expires_at=excluded.expires_at,
+                                        verified_at=NULL,
+                                        attempts=0""",
+                              (int(user_id), hash_activation_code(code), expires_at),
+                    )
+          return code
+
+
+def account_activation_required(user_id):
+          with get_connection() as conn:
+                    record = conn.execute(
+                              """SELECT verified_at FROM account_email_verifications
+                              WHERE user_id=?""",
+                              (int(user_id),),
+                    ).fetchone()
+          return bool(record and record["verified_at"] is None)
+
+
+def verify_account_activation_code(user_id, code):
+          with get_connection() as conn:
+                    record = conn.execute(
+                              """SELECT code_hash,expires_at,verified_at,attempts
+                              FROM account_email_verifications WHERE user_id=?""",
+                              (int(user_id),),
+                    ).fetchone()
+                    if not record or record["verified_at"] is not None:
+                              return "verified"
+                    if not record["code_hash"] or not record["expires_at"]:
+                              return "expired"
+                    if int(record["attempts"]) >= ACCOUNT_ACTIVATION_MAX_ATTEMPTS:
+                              return "locked"
+                    try:
+                              expires_at = datetime.fromisoformat(record["expires_at"])
+                    except (TypeError, ValueError):
+                              expires_at = datetime.min.replace(tzinfo=timezone.utc)
+                    if expires_at.tzinfo is None:
+                              expires_at = expires_at.replace(tzinfo=timezone.utc)
+                    if expires_at <= datetime.now(timezone.utc):
+                              conn.execute(
+                                        """UPDATE account_email_verifications
+                                        SET code_hash=NULL,expires_at=NULL
+                                        WHERE user_id=? AND verified_at IS NULL""",
+                                        (int(user_id),),
+                              )
+                              return "expired"
+                    if not verify_activation_code(code.strip(), record["code_hash"]):
+                              updated = conn.execute(
+                                        """UPDATE account_email_verifications
+                                        SET attempts=attempts+1
+                                        WHERE user_id=? AND verified_at IS NULL
+                                        AND attempts < ?""",
+                                        (int(user_id), ACCOUNT_ACTIVATION_MAX_ATTEMPTS),
+                              )
+                              if not updated.rowcount:
+                                        return "locked"
+                              if int(record["attempts"]) + 1 >= ACCOUNT_ACTIVATION_MAX_ATTEMPTS:
+                                        return "locked"
+                              return "invalid"
+                    updated = conn.execute(
+                              """UPDATE account_email_verifications
+                              SET code_hash=NULL,expires_at=NULL,verified_at=?,attempts=0
+                              WHERE user_id=? AND code_hash=?
+                              AND verified_at IS NULL AND attempts < ?""",
+                              (
+                                        datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                        int(user_id),
+                                        record["code_hash"],
+                                        ACCOUNT_ACTIVATION_MAX_ATTEMPTS,
+                              ),
+                    )
+                    if not updated.rowcount:
+                              return "locked"
+          return "verified"
+
+
+def delete_account_activation_record(user_id):
+          with get_connection() as conn:
+                    conn.execute(
+                              "DELETE FROM account_email_verifications WHERE user_id=?",
+                              (int(user_id),),
+                    )
 
 
 REMEMBER_COOKIE = "meal_dashboard_auth"
@@ -2936,6 +3061,29 @@ def logout():
           st.rerun()
 
 
+def complete_login(account, remember_me):
+          if remember_me:
+                    remember_token, remember_expires_at = create_remember_session(account["id"])
+                    auth_cookie.set(
+                              REMEMBER_COOKIE,
+                              remember_token,
+                              expires=remember_expires_at,
+                              secure=True,
+                              same_site="strict",
+                    )
+          else:
+                    remembered_token = auth_cookie.get(REMEMBER_COOKIE)
+                    if remembered_token:
+                              revoke_remember_session(remembered_token)
+                              auth_cookie.remove(
+                                        REMEMBER_COOKIE,
+                                        secure=True,
+                                        same_site="strict",
+                              )
+          st.session_state.user = dict(account)
+          st.session_state.page = "Dashboard"
+          st.rerun()
+
 
 if st.session_state.user is None:
 
@@ -2976,7 +3124,7 @@ if st.session_state.user is None:
                               unsafe_allow_html=True,
                     )
 
-          st.markdown('<div class="welcome-section-title">Access your workspace</div><div class="welcome-section-copy">Create an account once, then use Login on future visits. Keep me signed in to avoid logging in again on this device.</div>', unsafe_allow_html=True)
+          st.markdown('<div class="welcome-section-title">Access your workspace</div><div class="welcome-section-copy">Create an account once. After an administrator approves it, enter the one-time code emailed to you when you first log in.</div>', unsafe_allow_html=True)
 
           login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
 
@@ -2987,6 +3135,14 @@ if st.session_state.user is None:
                               email = st.text_input("Email address")
 
                               password = st.text_input("Password", type="password")
+                              approval_code = st.text_input(
+                                        "One-time approval code",
+                                        max_chars=6,
+                                        help=(
+                                                  "Only needed once after an administrator approves "
+                                                  "your account. The code expires after 30 minutes."
+                                        ),
+                              )
 
                               remember_me = st.checkbox(
                                         "Keep me signed in on this device until I log out",
@@ -3023,31 +3179,55 @@ if st.session_state.user is None:
                                                   st.warning("Your account is awaiting administrator approval.")
 
                                         else:
-
-                                                  if remember_me:
-                                                            remember_token, remember_expires_at = create_remember_session(account["id"])
-                                                            auth_cookie.set(
-                                                                      REMEMBER_COOKIE,
-                                                                      remember_token,
-                                                                      expires=remember_expires_at,
-                                                                      secure=True,
-                                                                      same_site="strict",
+                                                  try:
+                                                            needs_activation = account_activation_required(
+                                                                      account["id"]
                                                             )
-                                                  else:
-                                                            remembered_token = auth_cookie.get(REMEMBER_COOKIE)
-                                                            if remembered_token:
-                                                                      revoke_remember_session(remembered_token)
-                                                                      auth_cookie.remove(
-                                                                                REMEMBER_COOKIE,
-                                                                                secure=True,
-                                                                                same_site="strict",
-                                                                      )
-
-                                                  st.session_state.user = dict(account)
-
-                                                  st.session_state.page = "Dashboard"
-
-                                                  st.rerun()
+                                                            if needs_activation:
+                                                                      if not approval_code.strip():
+                                                                                st.warning(
+                                                                                          "Your account is approved. "
+                                                                                          "Enter the one-time code sent "
+                                                                                          "to your email. If it expired "
+                                                                                          "or did not arrive, ask an "
+                                                                                          "administrator to resend it."
+                                                                                )
+                                                                      else:
+                                                                                verification_result = (
+                                                                                          verify_account_activation_code(
+                                                                                                    account["id"],
+                                                                                                    approval_code,
+                                                                                          )
+                                                                                )
+                                                                                if verification_result == "verified":
+                                                                                          complete_login(account, remember_me)
+                                                                                elif verification_result == "invalid":
+                                                                                          st.error(
+                                                                                                    "That code is incorrect. "
+                                                                                                    "Codes are limited to "
+                                                                                                    "five attempts; ask an "
+                                                                                                    "administrator to resend "
+                                                                                                    "it if you reach the limit."
+                                                                                          )
+                                                                                elif verification_result == "locked":
+                                                                                          st.error(
+                                                                                                    "Too many incorrect "
+                                                                                                    "attempts. Ask an "
+                                                                                                    "administrator to resend "
+                                                                                                    "the activation code."
+                                                                                          )
+                                                                                else:
+                                                                                          st.error(
+                                                                                                    "That code has expired. "
+                                                                                                    "Ask an administrator "
+                                                                                                    "to resend it."
+                                                                                          )
+                                                            else:
+                                                                      complete_login(account, remember_me)
+                                                  except DB_ERRORS as error:
+                                                            st.error(
+                                                                      f"Could not verify the account activation code: {error}"
+                                                            )
 
                               else:
 
@@ -6042,7 +6222,8 @@ elif page == "User Approvals" and is_admin:
                     with st.expander("Test or resend account email"):
                               st.caption(
                                         "The test message goes to your signed-in account email. "
-                                        "A resend sends the approval confirmation to an approved account."
+                                        "For an approved account awaiting activation, a resend creates "
+                                        "a new one-time code and invalidates the previous code."
                               )
                               email_settings = st.secrets.get("email", {})
                               if st.button(
@@ -6076,23 +6257,43 @@ elif page == "User Approvals" and is_admin:
                                                   key="gmail_approved_account_email",
                                         )
                                         if st.button(
-                                                  "Send approval email",
+                                                  "Resend approval email / activation code",
                                                   key="gmail_account_approval_email",
                                         ):
                                                   try:
-                                                            send_account_approved_email(
-                                                                      email_settings.get("gmail_client_id", ""),
-                                                                      email_settings.get("gmail_client_secret", ""),
-                                                                      email_settings.get("gmail_refresh_token", ""),
-                                                                      email_settings.get("gmail_address", ""),
-                                                                      str(selected_email_account["email"]),
-                                                                      str(selected_email_account["name"]),
-                                                            )
+                                                            if account_activation_required(
+                                                                      selected_email_account["id"]
+                                                            ):
+                                                                      activation_code = create_account_activation_code(
+                                                                                selected_email_account["id"]
+                                                                      )
+                                                                      send_account_activation_code_email(
+                                                                                email_settings.get("gmail_client_id", ""),
+                                                                                email_settings.get("gmail_client_secret", ""),
+                                                                                email_settings.get("gmail_refresh_token", ""),
+                                                                                email_settings.get("gmail_address", ""),
+                                                                                str(selected_email_account["email"]),
+                                                                                str(selected_email_account["name"]),
+                                                                                activation_code,
+                                                                      )
+                                                                      success_message = "Activation code resent"
+                                                            else:
+                                                                      send_account_approved_email(
+                                                                                email_settings.get("gmail_client_id", ""),
+                                                                                email_settings.get("gmail_client_secret", ""),
+                                                                                email_settings.get("gmail_refresh_token", ""),
+                                                                                email_settings.get("gmail_address", ""),
+                                                                                str(selected_email_account["email"]),
+                                                                                str(selected_email_account["name"]),
+                                                                      )
+                                                                      success_message = "Approval email sent"
                                                   except EmailNotificationError as error:
                                                             st.error(f"Email resend failed: {error}")
+                                                  except (*DB_ERRORS, SpreadsheetStoreError) as error:
+                                                            st.error(f"Could not resend account email: {error}")
                                                   else:
                                                             st.success(
-                                                                      f"Approval email sent through Gmail to "
+                                                                      f"{success_message} through Gmail to "
                                                                       f"{selected_email_account['email']}. "
                                                                       "Check the recipient's inbox and spam folder."
                                                             )
@@ -6120,6 +6321,9 @@ elif page == "User Approvals" and is_admin:
                                                             if st.button("Approve", key=f"approve_{row['id']}"):
 
                                                                       try:
+                                                                                activation_code = create_account_activation_code(
+                                                                                          int(row["id"])
+                                                                                )
                                                                                 updated = update_user_account(
                                                                                           int(row["id"]),
                                                                                           {"approved": 1},
@@ -6150,23 +6354,24 @@ elif page == "User Approvals" and is_admin:
                                                                                                     "gmail_refresh_token", "",
                                                                                           )
                                                                                           try:
-                                                                                                    send_account_approved_email(
+                                                                                                    send_account_activation_code_email(
                                                                                                               gmail_client_id,
                                                                                                               gmail_client_secret,
                                                                                                               gmail_refresh_token,
                                                                                                               sender_email,
                                                                                                               str(row["email"]),
                                                                                                               str(row["name"]),
+                                                                                                              activation_code,
                                                                                                     )
                                                                                           except EmailNotificationError as error:
                                                                                                    st.session_state["account_approval_notice"] = (
                                                                                                              "warning",
-                                                                                                             f"Account approved, but the confirmation email was not sent: {error}",
+                                                                                                             f"Account approved, but the activation code email was not sent: {error}",
                                                                                                    )
                                                                                           else:
                                                                                                    st.session_state["account_approval_notice"] = (
                                                                                                              "success",
-                                                                                                             f"Account approved and confirmation email sent to {row['email']}.",
+                                                                                                             f"Account approved and activation code sent to {row['email']}.",
                                                                                                    )
                                                                                           if notification_error:
                                                                                                     notice_type, notice_message = st.session_state[
@@ -6179,6 +6384,8 @@ elif page == "User Approvals" and is_admin:
                                                                                           st.rerun()
                                                                       except SpreadsheetStoreError as error:
                                                                                 st.error(f"Could not approve account: {error}")
+                                                                      except DB_ERRORS as error:
+                                                                                st.error(f"Could not prepare account activation: {error}")
 
                                                   with delete_col:
 
