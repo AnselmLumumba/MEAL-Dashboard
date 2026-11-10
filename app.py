@@ -3062,6 +3062,8 @@ def logout():
 
 
 def complete_login(account, remember_me):
+          st.session_state.pop("activation_pending_user_id", None)
+          st.session_state.pop("activation_pending_remember_me", None)
           if remember_me:
                     remember_token, remember_expires_at = create_remember_session(account["id"])
                     auth_cookie.set(
@@ -3130,108 +3132,155 @@ if st.session_state.user is None:
 
           with login_tab:
 
-                    with st.form("login_form"):
-
-                              email = st.text_input("Email address")
-
-                              password = st.text_input("Password", type="password")
-                              approval_code = st.text_input(
-                                        "One-time approval code",
-                                        max_chars=6,
-                                        help=(
-                                                  "Only needed once after an administrator approves "
-                                                  "your account. The code expires after 30 minutes."
-                                        ),
-                              )
-
-                              remember_me = st.checkbox(
-                                        "Keep me signed in on this device until I log out",
-                                        value=True,
-                              )
-
-                              submitted = st.form_submit_button("Login", use_container_width=True)
-
-                    if submitted:
-
-                              account = get_user_by_email(email)
-                              authenticated, upgrade_legacy_hash = (
-                                        verify_password(password, account["password"])
-                                        if account
-                                        else (False, False)
-                              )
-
-                              if account and authenticated:
-
-                                        if upgrade_legacy_hash:
-                                                  try:
-                                                            update_user_account(
-                                                                      account["id"],
-                                                                      {"password_hash": hash_password(password)},
-                                                            )
-                                                  except SpreadsheetStoreError as error:
-                                                            st.error(
-                                                                      f"Could not update your account password hash: {error}"
-                                                            )
-                                                            st.stop()
-
-                                        if not account["approved"]:
-
-                                                  st.warning("Your account is awaiting administrator approval.")
-
+                    pending_user_id = st.session_state.get("activation_pending_user_id")
+                    if pending_user_id is not None:
+                              try:
+                                        account = get_user_by_id(pending_user_id)
+                                        if not account or not int(account["approved"]):
+                                                  st.session_state.pop(
+                                                            "activation_pending_user_id", None
+                                                  )
+                                                  st.session_state.pop(
+                                                            "activation_pending_remember_me", None
+                                                  )
+                                                  st.warning(
+                                                            "This account is no longer approved. "
+                                                            "Please sign in again or contact an administrator."
+                                                  )
                                         else:
-                                                  try:
-                                                            needs_activation = account_activation_required(
-                                                                      account["id"]
+                                                  st.info(
+                                                            f"Your password is confirmed, {account['name']}. "
+                                                            "Enter the one-time code emailed to you to finish "
+                                                            "your first login."
+                                                  )
+                                                  with st.form("activation_code_form"):
+                                                            approval_code = st.text_input(
+                                                                      "One-time approval code",
+                                                                      max_chars=6,
+                                                                      help=(
+                                                                                "The code expires after 30 minutes "
+                                                                                "and can be used once."
+                                                                      ),
                                                             )
-                                                            if needs_activation:
-                                                                      if not approval_code.strip():
-                                                                                st.warning(
-                                                                                          "Your account is approved. "
-                                                                                          "Enter the one-time code sent "
-                                                                                          "to your email. If it expired "
-                                                                                          "or did not arrive, ask an "
-                                                                                          "administrator to resend it."
+                                                            code_submitted = st.form_submit_button(
+                                                                      "Verify code",
+                                                                      use_container_width=True,
+                                                            )
+                                                  if code_submitted:
+                                                            try:
+                                                                      result = verify_account_activation_code(
+                                                                                account["id"],
+                                                                                approval_code,
+                                                                      )
+                                                            except DB_ERRORS as error:
+                                                                      st.error(
+                                                                                f"Could not verify the activation code: {error}"
+                                                                      )
+                                                            else:
+                                                                      if result == "verified":
+                                                                                complete_login(
+                                                                                          account,
+                                                                                          st.session_state.get(
+                                                                                                    "activation_pending_remember_me",
+                                                                                                    True,
+                                                                                          ),
+                                                                                )
+                                                                      elif result == "invalid":
+                                                                                st.error(
+                                                                                          "That code is incorrect. "
+                                                                                          "Codes are limited to five "
+                                                                                          "attempts; ask an administrator "
+                                                                                          "to resend it if you reach the limit."
+                                                                                )
+                                                                      elif result == "locked":
+                                                                                st.error(
+                                                                                          "Too many incorrect attempts. "
+                                                                                          "Ask an administrator to resend "
+                                                                                          "the activation code."
                                                                                 )
                                                                       else:
-                                                                                verification_result = (
-                                                                                          verify_account_activation_code(
-                                                                                                    account["id"],
-                                                                                                    approval_code,
-                                                                                          )
+                                                                                st.error(
+                                                                                          "That code has expired. "
+                                                                                          "Ask an administrator to resend it."
                                                                                 )
-                                                                                if verification_result == "verified":
-                                                                                          complete_login(account, remember_me)
-                                                                                elif verification_result == "invalid":
-                                                                                          st.error(
-                                                                                                    "That code is incorrect. "
-                                                                                                    "Codes are limited to "
-                                                                                                    "five attempts; ask an "
-                                                                                                    "administrator to resend "
-                                                                                                    "it if you reach the limit."
-                                                                                          )
-                                                                                elif verification_result == "locked":
-                                                                                          st.error(
-                                                                                                    "Too many incorrect "
-                                                                                                    "attempts. Ask an "
-                                                                                                    "administrator to resend "
-                                                                                                    "the activation code."
-                                                                                          )
-                                                                                else:
-                                                                                          st.error(
-                                                                                                    "That code has expired. "
-                                                                                                    "Ask an administrator "
-                                                                                                    "to resend it."
-                                                                                          )
-                                                            else:
-                                                                      complete_login(account, remember_me)
-                                                  except DB_ERRORS as error:
-                                                            st.error(
-                                                                      f"Could not verify the account activation code: {error}"
+                                                  if st.button(
+                                                            "Use a different account",
+                                                            key="cancel_activation_login",
+                                                  ):
+                                                            st.session_state.pop(
+                                                                      "activation_pending_user_id", None
                                                             )
+                                                            st.session_state.pop(
+                                                                      "activation_pending_remember_me", None
+                                                            )
+                                                            st.rerun()
+                              except (SpreadsheetStoreError, *DB_ERRORS) as error:
+                                        st.error(f"Could not load the account for activation: {error}")
+                    else:
+                              with st.form("login_form"):
+                                        email = st.text_input("Email address")
+                                        password = st.text_input("Password", type="password")
+                                        remember_me = st.checkbox(
+                                                  "Keep me signed in on this device until I log out",
+                                                  value=True,
+                                        )
+                                        submitted = st.form_submit_button(
+                                                  "Login",
+                                                  use_container_width=True,
+                                        )
 
-                              else:
+                              if submitted:
+                                        account = get_user_by_email(email)
+                                        authenticated, upgrade_legacy_hash = (
+                                                  verify_password(password, account["password"])
+                                                  if account
+                                                  else (False, False)
+                                        )
 
-                                        st.error("Incorrect email or password.")
+                                        if account and authenticated:
+                                                  if upgrade_legacy_hash:
+                                                            try:
+                                                                      update_user_account(
+                                                                                account["id"],
+                                                                                {
+                                                                                          "password_hash": hash_password(password)
+                                                                                },
+                                                                      )
+                                                            except SpreadsheetStoreError as error:
+                                                                      st.error(
+                                                                                f"Could not update your account password hash: {error}"
+                                                                      )
+                                                                      st.stop()
+
+                                                  if not account["approved"]:
+                                                            st.warning(
+                                                                      "Your account is awaiting administrator approval."
+                                                            )
+                                                  else:
+                                                            try:
+                                                                      needs_activation = account_activation_required(
+                                                                                account["id"]
+                                                                      )
+                                                            except (SpreadsheetStoreError, *DB_ERRORS) as error:
+                                                                      st.error(
+                                                                                f"Could not check account activation: {error}"
+                                                                      )
+                                                            else:
+                                                                      if needs_activation:
+                                                                                st.session_state[
+                                                                                          "activation_pending_user_id"
+                                                                                ] = int(account["id"])
+                                                                                st.session_state[
+                                                                                          "activation_pending_remember_me"
+                                                                                ] = remember_me
+                                                                                st.rerun()
+                                                                      else:
+                                                                                complete_login(
+                                                                                          account,
+                                                                                          remember_me,
+                                                                                )
+                                        else:
+                                                  st.error("Incorrect email or password.")
 
           with signup_tab:
 
